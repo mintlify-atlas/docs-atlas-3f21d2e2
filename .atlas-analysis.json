@@ -1,0 +1,173 @@
+{
+  "projectType": "framework",
+  "projectName": "FullStackHero .NET Starter Kit",
+  "projectDescription": "Production-grade modular monolith framework for building multi-tenant SaaS and enterprise APIs on .NET 10 with clean architecture",
+  "theme": "linden",
+  "primaryColor": "#6ec28c",
+  "lightColor": "#e0f2e4",
+  "darkColor": "#49516d",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "introduction",
+              "why-fullstackhero",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Getting Started",
+            "pages": [
+              "getting-started/installation",
+              "getting-started/aspire-setup",
+              "getting-started/configuration",
+              "getting-started/project-structure"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/overview",
+              "architecture/modular-monolith",
+              "architecture/vertical-slices",
+              "architecture/cqrs-mediator",
+              "architecture/domain-driven-design",
+              "architecture/multitenancy"
+            ]
+          },
+          {
+            "group": "Building Blocks",
+            "pages": [
+              "building-blocks/overview",
+              "building-blocks/core",
+              "building-blocks/persistence",
+              "building-blocks/caching",
+              "building-blocks/mailing",
+              "building-blocks/jobs",
+              "building-blocks/storage",
+              "building-blocks/eventing",
+              "building-blocks/web"
+            ]
+          },
+          {
+            "group": "Modules",
+            "pages": [
+              "modules/overview",
+              "modules/identity",
+              "modules/multitenancy",
+              "modules/auditing",
+              "modules/creating-modules"
+            ]
+          },
+          {
+            "group": "Development Guide",
+            "pages": [
+              "development/creating-features",
+              "development/commands-queries",
+              "development/endpoints",
+              "development/validation",
+              "development/permissions",
+              "development/database-migrations",
+              "development/testing"
+            ]
+          },
+          {
+            "group": "Features",
+            "pages": [
+              "features/authentication",
+              "features/authorization",
+              "features/multi-tenancy",
+              "features/rate-limiting",
+              "features/api-versioning",
+              "features/observability",
+              "features/health-checks",
+              "features/background-jobs"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/overview",
+              "deployment/docker",
+              "deployment/aws",
+              "deployment/configuration-management"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Identity API",
+            "pages": [
+              "api/identity/authentication",
+              "api/identity/users",
+              "api/identity/roles",
+              "api/identity/permissions",
+              "api/identity/groups",
+              "api/identity/sessions"
+            ]
+          },
+          {
+            "group": "Multitenancy API",
+            "pages": [
+              "api/multitenancy/tenants",
+              "api/multitenancy/tenant-status",
+              "api/multitenancy/migrations"
+            ]
+          },
+          {
+            "group": "Auditing API",
+            "pages": [
+              "api/auditing/security-logs",
+              "api/auditing/activity-logs",
+              "api/auditing/exception-logs"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Modular Monolith Architecture with Vertical Slices",
+    "CQRS with Mediator Pattern and FluentValidation",
+    "Multi-Tenancy with Finbuckle (Database-per-Tenant)",
+    "Complete Identity & Authorization (ASP.NET Identity + JWT)",
+    "Built-in Modules: Identity, Multitenancy, Auditing",
+    "EF Core 10 with Specifications Pattern",
+    "Distributed Caching with Redis",
+    "Background Jobs with Hangfire",
+    "OpenTelemetry Observability (Traces, Metrics, Logs)",
+    "API Versioning and Rate Limiting",
+    "OpenAPI/Swagger Documentation with Scalar UI",
+    "Aspire AppHost for Local Development",
+    "Terraform Infrastructure as Code"
+  ],
+  "publicApiSurface": [
+    "AddHeroPlatform() - Register framework services",
+    "UseHeroPlatform() - Configure middleware pipeline",
+    "AddModules() - Register custom modules",
+    "MapModules() - Map module endpoints",
+    "AddHeroDbContext<T>() - Register tenant-aware DbContext",
+    "UseHeroMultiTenantDatabases() - Apply tenant migrations",
+    "ICommand<T> / IQuery<T> - CQRS command/query contracts",
+    "ICommandHandler<TCommand, TResult> - Command handler interface",
+    "IQueryHandler<TQuery, TResult> - Query handler interface",
+    "IModule - Module registration interface",
+    "IRepository<T> - Repository pattern interface",
+    "IReadRepository<T> - Read-only repository interface",
+    "ISpecification<T> - Specification pattern interface",
+    "RequirePermission() - Permission-based authorization",
+    "/api/v1/identity/tokens - JWT token generation",
+    "/api/v1/identity/tokens/refresh - Token refresh",
+    "/api/v1/identity/users - User management",
+    "/api/v1/identity/roles - Role management",
+    "/api/v1/multitenancy/tenants - Tenant management",
+    "/api/v1/auditing/security - Security audit logs"
+  ]
+}
