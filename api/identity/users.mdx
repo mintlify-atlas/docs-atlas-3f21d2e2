@@ -1,0 +1,447 @@
+---
+title: 'Users'
+description: 'User management endpoints for creating, updating, and querying users'
+---
+
+## Overview
+
+The Users API provides comprehensive user management capabilities including registration, profile management, search, and user-role assignments.
+
+## Get User Profile
+
+Retrieve the authenticated user's profile information.
+
+<CodeGroup>
+```bash cURL
+curl -X GET https://api.example.com/api/v1/identity/profile \
+  -H "Authorization: Bearer {access_token}"
+```
+
+```csharp C#
+var query = new GetCurrentUserProfileQuery(userId);
+var profile = await mediator.Send(query);
+```
+</CodeGroup>
+
+### HTTP Request
+
+`GET /api/v1/identity/profile`
+
+### Authorization
+
+Requires valid JWT authentication. User ID is extracted from the access token.
+
+### Response
+
+<ResponseField name="id" type="string">
+  User's unique identifier
+</ResponseField>
+
+<ResponseField name="userName" type="string">
+  User's username
+</ResponseField>
+
+<ResponseField name="firstName" type="string">
+  User's first name
+</ResponseField>
+
+<ResponseField name="lastName" type="string">
+  User's last name
+</ResponseField>
+
+<ResponseField name="email" type="string">
+  User's email address
+</ResponseField>
+
+<ResponseField name="isActive" type="boolean">
+  Whether the user account is active
+</ResponseField>
+
+<ResponseField name="emailConfirmed" type="boolean">
+  Whether the user's email has been confirmed
+</ResponseField>
+
+<ResponseField name="phoneNumber" type="string">
+  User's phone number (optional)
+</ResponseField>
+
+<ResponseField name="imageUrl" type="string">
+  URL to user's profile image (optional)
+</ResponseField>
+
+### Response Example
+
+```json
+{
+  "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "userName": "john.doe",
+  "firstName": "John",
+  "lastName": "Doe",
+  "email": "john.doe@example.com",
+  "isActive": true,
+  "emailConfirmed": true,
+  "phoneNumber": "+1234567890",
+  "imageUrl": "https://storage.example.com/avatars/john.jpg"
+}
+```
+
+---
+
+## Update User Profile
+
+Update profile details for the authenticated user.
+
+<CodeGroup>
+```bash cURL
+curl -X PUT https://api.example.com/api/v1/identity/profile \
+  -H "Authorization: Bearer {access_token}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "firstName": "John",
+    "lastName": "Doe",
+    "phoneNumber": "+1234567890",
+    "email": "john.doe@example.com"
+  }'
+```
+
+```csharp C#
+var command = new UpdateUserCommand
+{
+    Id = userId,
+    FirstName = "John",
+    LastName = "Doe",
+    PhoneNumber = "+1234567890",
+    Email = "john.doe@example.com"
+};
+
+await mediator.Send(command);
+```
+</CodeGroup>
+
+### HTTP Request
+
+`PUT /api/v1/identity/profile`
+
+### Authorization
+
+Requires `Permissions.Users.Update` permission.
+
+### Request Body
+
+<ParamField body="firstName" type="string">
+  User's first name
+</ParamField>
+
+<ParamField body="lastName" type="string">
+  User's last name
+</ParamField>
+
+<ParamField body="phoneNumber" type="string">
+  User's phone number
+</ParamField>
+
+<ParamField body="email" type="string">
+  User's email address
+</ParamField>
+
+<ParamField body="image" type="FileUploadRequest">
+  Profile image file upload request
+</ParamField>
+
+<ParamField body="deleteCurrentImage" type="boolean" default="false">
+  Flag to delete the current profile image
+</ParamField>
+
+### Response
+
+Returns `200 OK` on successful update.
+
+---
+
+## Register User
+
+Create a new user account (admin operation).
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://api.example.com/api/v1/identity/register \
+  -H "Authorization: Bearer {access_token}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "firstName": "Jane",
+    "lastName": "Smith",
+    "email": "jane.smith@example.com",
+    "userName": "jane.smith",
+    "password": "SecurePass123!",
+    "confirmPassword": "SecurePass123!",
+    "phoneNumber": "+1987654321"
+  }'
+```
+
+```csharp C#
+var command = new RegisterUserCommand
+{
+    FirstName = "Jane",
+    LastName = "Smith",
+    Email = "jane.smith@example.com",
+    UserName = "jane.smith",
+    Password = "SecurePass123!",
+    ConfirmPassword = "SecurePass123!",
+    PhoneNumber = "+1987654321"
+};
+
+var response = await mediator.Send(command);
+```
+</CodeGroup>
+
+### HTTP Request
+
+`POST /api/v1/identity/register`
+
+### Authorization
+
+Requires `Permissions.Users.Create` permission.
+
+### Request Body
+
+<ParamField body="firstName" type="string" required>
+  User's first name
+</ParamField>
+
+<ParamField body="lastName" type="string" required>
+  User's last name
+</ParamField>
+
+<ParamField body="email" type="string" required>
+  User's email address (must be unique)
+</ParamField>
+
+<ParamField body="userName" type="string" required>
+  Username for login (must be unique)
+</ParamField>
+
+<ParamField body="password" type="string" required>
+  User's password (minimum 6 characters)
+</ParamField>
+
+<ParamField body="confirmPassword" type="string" required>
+  Password confirmation (must match password)
+</ParamField>
+
+<ParamField body="phoneNumber" type="string">
+  User's phone number (optional)
+</ParamField>
+
+### Response
+
+Returns a `RegisterUserResponse` with user details.
+
+---
+
+## Get User by ID
+
+Retrieve a user's profile details by their unique identifier.
+
+<CodeGroup>
+```bash cURL
+curl -X GET https://api.example.com/api/v1/identity/users/{userId} \
+  -H "Authorization: Bearer {access_token}"
+```
+
+```csharp C#
+var query = new GetUserQuery(userId);
+var user = await mediator.Send(query);
+```
+</CodeGroup>
+
+### HTTP Request
+
+`GET /api/v1/identity/users/{id}`
+
+### Authorization
+
+Requires `Permissions.Users.View` permission.
+
+### Path Parameters
+
+<ParamField path="id" type="guid" required>
+  The unique identifier of the user
+</ParamField>
+
+### Response
+
+Returns a `UserDto` object with user details (same structure as Get User Profile).
+
+---
+
+## Search Users
+
+Search and filter users with server-side pagination, sorting, and filtering.
+
+<CodeGroup>
+```bash cURL
+curl -X GET "https://api.example.com/api/v1/identity/users/search?pageNumber=1&pageSize=10&search=john&isActive=true" \
+  -H "Authorization: Bearer {access_token}"
+```
+
+```csharp C#
+var query = new SearchUsersQuery
+{
+    PageNumber = 1,
+    PageSize = 10,
+    Search = "john",
+    IsActive = true,
+    EmailConfirmed = true,
+    RoleId = "admin-role-id"
+};
+
+var result = await mediator.Send(query);
+```
+</CodeGroup>
+
+### HTTP Request
+
+`GET /api/v1/identity/users/search`
+
+### Authorization
+
+Requires `Permissions.Users.View` permission.
+
+### Query Parameters
+
+<ParamField query="pageNumber" type="integer">
+  Page number for pagination (1-based)
+</ParamField>
+
+<ParamField query="pageSize" type="integer">
+  Number of items per page
+</ParamField>
+
+<ParamField query="sort" type="string">
+  Sort expression (e.g., "firstName asc", "email desc")
+</ParamField>
+
+<ParamField query="search" type="string">
+  Search term to filter users by name, email, or username
+</ParamField>
+
+<ParamField query="isActive" type="boolean">
+  Filter by active status
+</ParamField>
+
+<ParamField query="emailConfirmed" type="boolean">
+  Filter by email confirmation status
+</ParamField>
+
+<ParamField query="roleId" type="string">
+  Filter users by assigned role ID
+</ParamField>
+
+### Response
+
+<ResponseField name="data" type="array<UserDto>">
+  Array of user objects matching the search criteria
+</ResponseField>
+
+<ResponseField name="totalCount" type="integer">
+  Total number of matching users
+</ResponseField>
+
+<ResponseField name="pageNumber" type="integer">
+  Current page number
+</ResponseField>
+
+<ResponseField name="pageSize" type="integer">
+  Number of items per page
+</ResponseField>
+
+### Response Example
+
+```json
+{
+  "data": [
+    {
+      "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "userName": "john.doe",
+      "firstName": "John",
+      "lastName": "Doe",
+      "email": "john.doe@example.com",
+      "isActive": true,
+      "emailConfirmed": true,
+      "phoneNumber": "+1234567890",
+      "imageUrl": "https://storage.example.com/avatars/john.jpg"
+    }
+  ],
+  "totalCount": 45,
+  "pageNumber": 1,
+  "pageSize": 10
+}
+```
+
+---
+
+## Delete User
+
+Delete a user by their unique identifier.
+
+<CodeGroup>
+```bash cURL
+curl -X DELETE https://api.example.com/api/v1/identity/users/{userId} \
+  -H "Authorization: Bearer {access_token}"
+```
+
+```csharp C#
+var command = new DeleteUserCommand(userId);
+await mediator.Send(command);
+```
+</CodeGroup>
+
+### HTTP Request
+
+`DELETE /api/v1/identity/users/{id}`
+
+### Authorization
+
+Requires `Permissions.Users.Delete` permission.
+
+### Path Parameters
+
+<ParamField path="id" type="guid" required>
+  The unique identifier of the user to delete
+</ParamField>
+
+### Response
+
+Returns `204 No Content` on successful deletion.
+
+---
+
+## Additional User Endpoints
+
+### Get User Roles
+
+`GET /api/v1/identity/users/{id}/roles` - Get roles assigned to a specific user
+
+### Assign User Roles
+
+`POST /api/v1/identity/users/{id}/roles` - Assign roles to a user
+
+### Change Password
+
+`POST /api/v1/identity/users/change-password` - Change the current user's password
+
+### Toggle User Status
+
+`POST /api/v1/identity/users/{id}/toggle-status` - Activate or deactivate a user account
+
+### Confirm Email
+
+`POST /api/v1/identity/users/confirm-email` - Confirm user's email address
+
+### Forgot Password
+
+`POST /api/v1/identity/users/forgot-password` - Initiate password reset process
+
+### Reset Password
+
+`POST /api/v1/identity/users/reset-password` - Reset password with reset token

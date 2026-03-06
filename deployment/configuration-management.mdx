@@ -1,0 +1,814 @@
+---
+title: Configuration Management
+description: Master environment variables, secrets management, and configuration hierarchies for production deployments
+icon: gear
+---
+
+The FullStackHero .NET Starter Kit follows ASP.NET Core's hierarchical configuration system. This guide covers configuration best practices, secrets management, and environment-specific overrides.
+
+## Configuration Hierarchy
+
+ASP.NET Core loads configuration in the following order (later sources override earlier ones):
+
+<Steps>
+  <Step title="appsettings.json">
+    **Base configuration** - Shared across all environments, committed to source control.
+    
+    Contains non-sensitive defaults like:
+    - Logging levels
+    - OpenTelemetry configuration structure
+    - Module settings
+    - Feature flags
+  </Step>
+
+  <Step title="appsettings.{Environment}.json">
+    **Environment-specific overrides** - Loaded based on `ASPNETCORE_ENVIRONMENT`.
+    
+    - `appsettings.Development.json` - Dev overrides (CORS, OpenAPI enabled)
+    - `appsettings.Production.json` - Prod overrides (security hardening)
+    
+    **Production file should have empty strings for secrets, never actual values.**
+  </Step>
+
+  <Step title="Environment Variables">
+    **Runtime configuration** - Highest priority, overrides JSON files.
+    
+    Use for:
+    - Secrets (connection strings, API keys, JWT keys)
+    - Environment-specific URLs
+    - Cloud provider configurations
+    
+    Supports double-underscore (`__`) notation:
+    ```bash
+    DatabaseOptions__ConnectionString="Host=..."
+    ```
+  </Step>
+
+  <Step title="Secrets Manager (AWS/Azure)">
+    **Cloud-native secrets** - Injected as environment variables by ECS/Kubernetes.
+    
+    AWS: Secrets Manager → ECS Task Definition → Environment Variables
+    
+    Azure: Key Vault → Container Apps → Environment Variables
+  </Step>
+</Steps>
+
+<Note>
+  **Configuration Priority**: Secrets Manager (via env vars) > Environment Variables > `appsettings.{Environment}.json` > `appsettings.json`
+</Note>
+
+## Configuration Files
+
+### appsettings.json (Base)
+
+Contains shared configuration and non-sensitive defaults:
+
+<CodeGroup>
+```json src/Playground/Playground.Api/appsettings.json
+{
+  "OpenTelemetryOptions": {
+    "Enabled": true,
+    "Tracing": { "Enabled": true },
+    "Metrics": {
+      "Enabled": true,
+      "MeterNames": [
+        "FSH.Modules.Identity",
+        "FSH.Modules.Multitenancy",
+        "FSH.Modules.Auditing"
+      ]
+    },
+    "Exporter": {
+      "Otlp": {
+        "Enabled": true,
+        "Endpoint": "http://localhost:4317",
+        "Protocol": "grpc"
+      }
+    }
+  },
+  "Serilog": {
+    "MinimumLevel": { "Default": "Debug" },
+    "WriteTo": [
+      { "Name": "Console" },
+      { "Name": "OpenTelemetry" }
+    ]
+  },
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning",
+      "Hangfire": "Warning",
+      "Microsoft.EntityFrameworkCore": "Warning"
+    }
+  },
+  "DatabaseOptions": {
+    "Provider": "POSTGRESQL",
+    "ConnectionString": "Server=localhost;Database=fsh;User Id=postgres;Password=password",
+    "MigrationsAssembly": "FSH.Playground.Migrations.PostgreSQL"
+  },
+  "OriginOptions": {
+    "OriginUrl": "https://localhost:7030"
+  },
+  "CachingOptions": {
+    "Redis": ""
+  },
+  "HangfireOptions": {
+    "Username": "admin",
+    "Password": "Secure1234!Me",
+    "Route": "/jobs"
+  },
+  "PasswordPolicy": {
+    "PasswordHistoryCount": 5,
+    "PasswordExpiryDays": 90,
+    "PasswordExpiryWarningDays": 14,
+    "EnforcePasswordExpiry": true
+  },
+  "AllowedHosts": "*",
+  "OpenApiOptions": {
+    "Enabled": true,
+    "Title": "FSH PlayGround API",
+    "Version": "v1",
+    "Description": "The FSH Starter Kit API for Modular/Multitenant Architecture."
+  },
+  "CorsOptions": {
+    "AllowAll": false,
+    "AllowedOrigins": [
+      "https://localhost:4200",
+      "https://localhost:7140"
+    ]
+  },
+  "JwtOptions": {
+    "Issuer": "fsh.local",
+    "Audience": "fsh.clients",
+    "SigningKey": "replace-with-256-bit-secret-min-32-chars",
+    "AccessTokenMinutes": 2,
+    "RefreshTokenDays": 7
+  },
+  "RateLimitingOptions": {
+    "Enabled": false,
+    "Global": {
+      "PermitLimit": 100,
+      "WindowSeconds": 60
+    },
+    "Auth": {
+      "PermitLimit": 10,
+      "WindowSeconds": 60
+    }
+  },
+  "MultitenancyOptions": {
+    "RunTenantMigrationsOnStartup": true
+  },
+  "Storage": {
+    "Provider": "local"
+  }
+}
+```
+
+```json appsettings.Development.json
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+  "CorsOptions": {
+    "AllowAll": true
+  },
+  "OpenApiOptions": {
+    "Enabled": true
+  },
+  "MultitenancyOptions": {
+    "RunTenantMigrationsOnStartup": false,
+    "AutoProvisionOnStartup": true
+  },
+  "OpenTelemetryOptions": {
+    "Exporter": {
+      "Otlp": {
+        "Enabled": false
+      }
+    }
+  }
+}
+```
+
+```json appsettings.Production.json
+{
+  "OpenTelemetryOptions": {
+    "Enabled": true,
+    "Exporter": {
+      "Otlp": {
+        "Enabled": false,
+        "Endpoint": ""
+      }
+    }
+  },
+  "Serilog": {
+    "MinimumLevel": { "Default": "Information" }
+  },
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning",
+      "Hangfire": "Warning",
+      "Microsoft.EntityFrameworkCore": "Warning"
+    }
+  },
+  "DatabaseOptions": {
+    "Provider": "POSTGRESQL",
+    "ConnectionString": ""
+  },
+  "OriginOptions": {
+    "OriginUrl": ""
+  },
+  "CachingOptions": {
+    "Redis": ""
+  },
+  "HangfireOptions": {
+    "Username": "",
+    "Password": "",
+    "Route": "/jobs"
+  },
+  "AllowedHosts": "api.example.com",
+  "OpenApiOptions": {
+    "Enabled": false
+  },
+  "CorsOptions": {
+    "AllowAll": false,
+    "AllowedOrigins": []
+  },
+  "JwtOptions": {
+    "SigningKey": "",
+    "AccessTokenMinutes": 60,
+    "RefreshTokenDays": 7
+  },
+  "RateLimitingOptions": {
+    "Enabled": true
+  },
+  "MultitenancyOptions": {
+    "RunTenantMigrationsOnStartup": false
+  },
+  "Storage": {
+    "Provider": "s3"
+  }
+}
+```
+</CodeGroup>
+
+<Warning>
+  **Never commit secrets to `appsettings.Production.json`.** Use empty strings and inject via environment variables or Secrets Manager.
+</Warning>
+
+## Environment Variables
+
+### Naming Convention
+
+ASP.NET Core uses double-underscore (`__`) to represent nested configuration:
+
+```bash
+# JSON configuration
+{
+  "DatabaseOptions": {
+    "ConnectionString": "..."
+  }
+}
+
+# Equivalent environment variable
+DatabaseOptions__ConnectionString="Host=..."
+```
+
+### Common Configuration Variables
+
+<Tabs>
+  <Tab title="Database">
+    ```bash
+    # PostgreSQL connection
+    DatabaseOptions__Provider=POSTGRESQL
+    DatabaseOptions__ConnectionString="Host=postgres;Port=5432;Database=fsh;Username=postgres;Password=SecurePassword123;Pooling=true;SSL Mode=Require;Trust Server Certificate=true"
+    DatabaseOptions__MigrationsAssembly=FSH.Playground.Migrations.PostgreSQL
+    
+    # SQL Server connection (alternative)
+    # DatabaseOptions__Provider=SQLSERVER
+    # DatabaseOptions__ConnectionString="Server=sql;Database=fsh;User Id=sa;Password=SecurePassword123;TrustServerCertificate=True"
+    # DatabaseOptions__MigrationsAssembly=FSH.Playground.Migrations.MSSQL
+    ```
+    
+    **AWS RDS**: Connection string with SSL Mode=Require
+    
+    **Azure SQL**: Connection string with TrustServerCertificate or valid certificate
+  </Tab>
+
+  <Tab title="Redis Cache">
+    ```bash
+    # Local Redis
+    CachingOptions__Redis="localhost:6379"
+    
+    # Redis with password
+    CachingOptions__Redis="redis:6379,password=SecurePassword123"
+    
+    # Redis with SSL (AWS ElastiCache)
+    CachingOptions__Redis="your-redis.cache.amazonaws.com:6379,ssl=true"
+    
+    # Azure Cache for Redis
+    CachingOptions__Redis="your-cache.redis.cache.windows.net:6380,ssl=true,password=..."
+    ```
+  </Tab>
+
+  <Tab title="JWT Authentication">
+    ```bash
+    JwtOptions__Issuer="your-company.com"
+    JwtOptions__Audience="your-app-clients"
+    JwtOptions__SigningKey="your-secret-key-must-be-at-least-32-characters-long-for-security"
+    JwtOptions__AccessTokenMinutes=60
+    JwtOptions__RefreshTokenDays=7
+    ```
+    
+    **Production**: Store `SigningKey` in Secrets Manager, never in source control or plain env vars.
+  </Tab>
+
+  <Tab title="CORS & Origins">
+    ```bash
+    # Development (allow all)
+    CorsOptions__AllowAll=true
+    
+    # Production (explicit origins)
+    CorsOptions__AllowAll=false
+    CorsOptions__AllowedOrigins__0="https://app.yourcompany.com"
+    CorsOptions__AllowedOrigins__1="https://admin.yourcompany.com"
+    
+    # Origin URL (for redirects, emails)
+    OriginOptions__OriginUrl="https://app.yourcompany.com"
+    ```
+  </Tab>
+
+  <Tab title="Storage">
+    ```bash
+    # Local file system (development)
+    Storage__Provider=local
+    
+    # AWS S3
+    Storage__Provider=s3
+    Storage__S3__Bucket="your-app-bucket"
+    Storage__S3__Region="us-east-1"
+    Storage__S3__PublicBaseUrl="https://d1234567890.cloudfront.net"
+    
+    # Azure Blob Storage
+    Storage__Provider=azure
+    Storage__Azure__ConnectionString="DefaultEndpointsProtocol=https;..."
+    Storage__Azure__Container="uploads"
+    ```
+  </Tab>
+
+  <Tab title="OpenTelemetry">
+    ```bash
+    # Enable/disable telemetry
+    OpenTelemetryOptions__Enabled=true
+    OpenTelemetryOptions__Tracing__Enabled=true
+    OpenTelemetryOptions__Metrics__Enabled=true
+    
+    # OTLP exporter (Jaeger, Zipkin, etc.)
+    OpenTelemetryOptions__Exporter__Otlp__Enabled=true
+    OpenTelemetryOptions__Exporter__Otlp__Endpoint="http://jaeger:4317"
+    OpenTelemetryOptions__Exporter__Otlp__Protocol=grpc
+    ```
+  </Tab>
+</Tabs>
+
+### Setting Environment Variables
+
+<CodeGroup>
+```bash Docker Compose
+# docker-compose.yml
+services:
+  api:
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - DatabaseOptions__ConnectionString=Host=postgres;...
+      - CachingOptions__Redis=redis:6379,password=SecurePassword123
+      - JwtOptions__SigningKey=${JWT_SIGNING_KEY}
+```
+
+```bash Bash / Shell
+# .env file (not committed to source control)
+export ASPNETCORE_ENVIRONMENT=Production
+export DatabaseOptions__ConnectionString="Host=localhost;..."
+export JwtOptions__SigningKey="your-secret-key-min-32-chars"
+
+# Load and run
+source .env
+dotnet run --project src/Playground/Playground.Api
+```
+
+```bash PowerShell
+# Set environment variables
+$env:ASPNETCORE_ENVIRONMENT="Production"
+$env:DatabaseOptions__ConnectionString="Host=localhost;..."
+$env:JwtOptions__SigningKey="your-secret-key-min-32-chars"
+
+# Run application
+dotnet run --project src/Playground/Playground.Api
+```
+
+```bash AWS ECS Task Definition (Terraform)
+# Terraform configuration
+environment_variables = {
+  ASPNETCORE_ENVIRONMENT = "Production"
+  CachingOptions__Redis  = module.redis.connection_string
+  Storage__Provider      = "s3"
+  Storage__S3__Bucket    = var.app_s3_bucket_name
+}
+
+# Secrets from Secrets Manager
+secrets = [
+  {
+    name      = "DatabaseOptions__ConnectionString"
+    valueFrom = aws_secretsmanager_secret.db_connection_string.arn
+  },
+  {
+    name      = "JwtOptions__SigningKey"
+    valueFrom = aws_secretsmanager_secret.jwt_signing_key.arn
+  }
+]
+```
+</CodeGroup>
+
+## Secrets Management
+
+### AWS Secrets Manager
+
+The Terraform configuration automatically manages secrets:
+
+<Steps>
+  <Step title="RDS Password (AWS-Managed)">
+    When `db_manage_master_user_password = true`, AWS generates and stores the password:
+    
+    ```hcl terraform/apps/playground/app_stack/main.tf
+    resource "aws_db_instance" "this" {
+      manage_master_user_password = true  # AWS generates password
+    }
+    
+    # Read the password and create connection string
+    data "aws_secretsmanager_secret_version" "rds_password" {
+      secret_id = module.rds.secret_arn
+    }
+    
+    resource "aws_secretsmanager_secret" "db_connection_string" {
+      name = "dev-db-connection-string"
+    }
+    
+    resource "aws_secretsmanager_secret_version" "db_connection_string" {
+      secret_id = aws_secretsmanager_secret.db_connection_string.id
+      secret_string = "Host=${module.rds.endpoint};Database=fsh;Username=postgres;Password=${jsondecode(data.aws_secretsmanager_secret_version.rds_password.secret_string)["password"]};Pooling=true;SSL Mode=Require"
+    }
+    ```
+    
+    The full connection string is injected into ECS tasks via the `secrets` configuration.
+  </Step>
+
+  <Step title="JWT Signing Key">
+    Create a secret for the JWT signing key:
+    
+    ```bash
+    # Generate a strong key (32+ characters)
+    SECRET_KEY=$(openssl rand -base64 48)
+    
+    # Store in Secrets Manager
+    aws secretsmanager create-secret \
+      --name dev-jwt-signing-key \
+      --secret-string "$SECRET_KEY" \
+      --region us-east-1
+    
+    # Get the ARN
+    aws secretsmanager describe-secret \
+      --secret-id dev-jwt-signing-key \
+      --query ARN \
+      --output text
+    ```
+    
+    Update Terraform to inject into ECS:
+    ```hcl
+    secrets = [
+      {
+        name      = "JwtOptions__SigningKey"
+        valueFrom = "arn:aws:secretsmanager:us-east-1:123456789012:secret:dev-jwt-signing-key"
+      }
+    ]
+    ```
+  </Step>
+
+  <Step title="Hangfire Credentials">
+    Store Hangfire dashboard credentials:
+    
+    ```bash
+    aws secretsmanager create-secret \
+      --name dev-hangfire-credentials \
+      --secret-string '{"username":"admin","password":"SecurePassword123"}' \
+      --region us-east-1
+    ```
+    
+    Inject into ECS:
+    ```hcl
+    secrets = [
+      {
+        name      = "HangfireOptions__Password"
+        valueFrom = "arn:aws:secretsmanager:us-east-1:123456789012:secret:dev-hangfire-credentials:password::"
+      }
+    ]
+    ```
+  </Step>
+
+  <Step title="Retrieve Secrets">
+    View secrets (for debugging):
+    
+    ```bash
+    # List secrets
+    aws secretsmanager list-secrets --region us-east-1
+    
+    # Get secret value
+    aws secretsmanager get-secret-value \
+      --secret-id dev-db-connection-string \
+      --query SecretString \
+      --output text
+    ```
+  </Step>
+</Steps>
+
+### Azure Key Vault
+
+For Azure deployments:
+
+```bash
+# Create Key Vault
+az keyvault create \
+  --name fsh-dev-keyvault \
+  --resource-group fsh-dev-rg \
+  --location eastus
+
+# Store secrets
+az keyvault secret set \
+  --vault-name fsh-dev-keyvault \
+  --name database-connection-string \
+  --value "Server=...;Database=fsh;..."
+
+az keyvault secret set \
+  --vault-name fsh-dev-keyvault \
+  --name jwt-signing-key \
+  --value "your-secret-key-min-32-chars"
+
+# Grant access to Container App managed identity
+az keyvault set-policy \
+  --name fsh-dev-keyvault \
+  --object-id <managed-identity-id> \
+  --secret-permissions get list
+```
+
+## Configuration Best Practices
+
+<AccordionGroup>
+  <Accordion title="1. Never Commit Secrets" icon="lock">
+    **DO:**
+    - Use `appsettings.Production.json` with empty strings for secrets
+    - Store secrets in AWS Secrets Manager, Azure Key Vault, or environment variables
+    - Add `.env` files to `.gitignore`
+    
+    **DON'T:**
+    - Commit passwords, API keys, or connection strings to source control
+    - Use placeholder values like `password` or `secret` in production config
+    - Store secrets in Docker images
+  </Accordion>
+
+  <Accordion title="2. Use Separate Configs per Environment" icon="code-branch">
+    Create environment-specific configurations:
+    
+    ```bash
+    appsettings.json              # Base
+    appsettings.Development.json  # Dev overrides
+    appsettings.Staging.json      # Staging overrides
+    appsettings.Production.json   # Prod overrides
+    ```
+    
+    Set `ASPNETCORE_ENVIRONMENT` to load the correct file:
+    ```bash
+    ASPNETCORE_ENVIRONMENT=Production
+    ```
+  </Accordion>
+
+  <Accordion title="3. Validate Configuration on Startup" icon="circle-check">
+    Add validation to catch configuration errors early:
+    
+    ```csharp
+    // In Program.cs or configuration extension
+    builder.Services.AddOptions<DatabaseOptions>()
+        .Bind(builder.Configuration.GetSection("DatabaseOptions"))
+        .ValidateDataAnnotations()
+        .ValidateOnStart();
+    
+    // DatabaseOptions.cs
+    public class DatabaseOptions
+    {
+        [Required]
+        public string Provider { get; set; } = null!;
+        
+        [Required]
+        [MinLength(10)]
+        public string ConnectionString { get; set; } = null!;
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="4. Use Connection String Builders" icon="link">
+    Build connection strings programmatically for better control:
+    
+    ```csharp
+    var builder = new NpgsqlConnectionStringBuilder
+    {
+        Host = configuration["Database__Host"],
+        Port = int.Parse(configuration["Database__Port"] ?? "5432"),
+        Database = configuration["Database__Name"],
+        Username = configuration["Database__Username"],
+        Password = configuration["Database__Password"],
+        Pooling = true,
+        SslMode = SslMode.Require,
+        TrustServerCertificate = false
+    };
+    
+    var connectionString = builder.ToString();
+    ```
+  </Accordion>
+
+  <Accordion title="5. Document Required Configuration" icon="book">
+    Maintain a configuration reference:
+    
+    ```markdown
+    # Required Configuration
+    
+    ## Database
+    - `DatabaseOptions__Provider`: `POSTGRESQL` or `SQLSERVER`
+    - `DatabaseOptions__ConnectionString`: Full connection string with credentials
+    - `DatabaseOptions__MigrationsAssembly`: Migration project name
+    
+    ## Authentication
+    - `JwtOptions__SigningKey`: Min 32 characters, store in Secrets Manager
+    - `JwtOptions__Issuer`: Your domain or app identifier
+    - `JwtOptions__Audience`: Client identifier
+    
+    ## Storage
+    - `Storage__Provider`: `local`, `s3`, or `azure`
+    - `Storage__S3__Bucket`: S3 bucket name (if using S3)
+    - `Storage__S3__Region`: AWS region
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Production Configuration Checklist
+
+Before deploying to production:
+
+<Steps>
+  <Step title="Security">
+    ✅ `ASPNETCORE_ENVIRONMENT=Production` set
+    
+    ✅ All secrets stored in Secrets Manager or Key Vault
+    
+    ✅ JWT signing key is strong (min 32 characters) and never committed
+    
+    ✅ Database connection uses SSL/TLS (`SSL Mode=Require`)
+    
+    ✅ Redis connection uses SSL if available
+    
+    ✅ CORS configured with explicit allowed origins (no `AllowAll`)
+    
+    ✅ `AllowedHosts` set to your domain
+  </Step>
+
+  <Step title="Features">
+    ✅ OpenAPI/Swagger disabled (`OpenApiOptions__Enabled=false`)
+    
+    ✅ Rate limiting enabled (`RateLimitingOptions__Enabled=true`)
+    
+    ✅ Tenant migrations disabled on startup (`MultitenancyOptions__RunTenantMigrationsOnStartup=false`)
+    
+    ✅ Storage provider set to cloud (`s3` or `azure`, not `local`)
+  </Step>
+
+  <Step title="Observability">
+    ✅ OpenTelemetry configured with production collector endpoint
+    
+    ✅ Serilog minimum level set to `Information` (not `Debug`)
+    
+    ✅ CloudWatch Logs or equivalent configured
+    
+    ✅ Health checks configured (`/health/live`, `/health/ready`)
+  </Step>
+
+  <Step title="Performance">
+    ✅ Redis caching configured and tested
+    
+    ✅ Database connection pooling enabled
+    
+    ✅ S3/Azure storage with CDN (CloudFront/Azure CDN)
+    
+    ✅ ECS auto-scaling policies configured
+  </Step>
+
+  <Step title="Testing">
+    ✅ Configuration loaded successfully (check startup logs)
+    
+    ✅ Database migrations applied
+    
+    ✅ Authentication flow works (login, token refresh)
+    
+    ✅ File uploads work (S3/Azure storage)
+    
+    ✅ Background jobs run (Hangfire)
+  </Step>
+</Steps>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Configuration value not loading">
+    **Problem**: Environment variable or secret not being read.
+    
+    **Debug**:
+    ```csharp
+    // Add to Program.cs for debugging
+    var config = builder.Configuration.GetSection("DatabaseOptions").Get<DatabaseOptions>();
+    Console.WriteLine($"ConnectionString: {config?.ConnectionString}");
+    ```
+    
+    **Common issues**:
+    - Typo in environment variable name (check double underscores)
+    - Wrong `ASPNETCORE_ENVIRONMENT` value
+    - Secrets Manager permission denied (check IAM role)
+  </Accordion>
+
+  <Accordion title="Secrets Manager access denied">
+    **Error**: `User: arn:aws:sts::123456789012:assumed-role/... is not authorized to perform: secretsmanager:GetSecretValue`
+    
+    **Solution**: Grant ECS task execution role access to secrets:
+    
+    ```hcl
+    resource "aws_iam_role_policy" "task_execution_secrets" {
+      name = "task-execution-secrets-access"
+      role = aws_iam_role.task_execution.id
+      
+      policy = jsonencode({
+        Version = "2012-10-17"
+        Statement = [{
+          Effect = "Allow"
+          Action = ["secretsmanager:GetSecretValue"]
+          Resource = [
+            aws_secretsmanager_secret.db_connection_string.arn,
+            aws_secretsmanager_secret.jwt_signing_key.arn
+          ]
+        }]
+      })
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Connection string format errors">
+    **Error**: `Keyword not supported: 'server'`
+    
+    **Cause**: Using SQL Server connection string format with PostgreSQL (or vice versa).
+    
+    **Solution**:
+    - **PostgreSQL**: `Host=...;Port=5432;Database=...;Username=...;Password=...`
+    - **SQL Server**: `Server=...;Database=...;User Id=...;Password=...`
+  </Accordion>
+
+  <Accordion title="Array configuration not working">
+    **Problem**: `CorsOptions__AllowedOrigins__0` not loading.
+    
+    **Solution**: Use index notation for arrays:
+    ```bash
+    CorsOptions__AllowedOrigins__0="https://app.example.com"
+    CorsOptions__AllowedOrigins__1="https://admin.example.com"
+    ```
+    
+    Or use JSON in environment variable:
+    ```bash
+    CorsOptions__AllowedOrigins='["https://app.example.com","https://admin.example.com"]'
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="AWS Deployment" icon="aws" href="/deployment/aws">
+    Learn how Terraform automatically configures secrets and environment variables
+  </Card>
+  
+  <Card title="Docker Deployment" icon="docker" href="/deployment/docker">
+    Set up environment variables and secrets for Docker Compose deployments
+  </Card>
+  
+  <Card title="Deployment Overview" icon="rocket" href="/deployment/overview">
+    Review production considerations and deployment best practices
+  </Card>
+  
+  <Card title="Security Best Practices" icon="shield">
+    Deep dive into authentication, authorization, and security hardening
+  </Card>
+</CardGroup>

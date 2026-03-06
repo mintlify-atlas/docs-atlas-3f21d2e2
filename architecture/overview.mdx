@@ -1,0 +1,230 @@
+---
+title: 'Architecture Overview'
+description: 'High-level architecture of FullStackHero .NET Starter Kit - a modular monolith built with DDD, CQRS, and vertical slices'
+icon: 'sitemap'
+---
+
+## Introduction
+
+FullStackHero .NET Starter Kit is a **modular monolith** designed for building production-ready, multi-tenant applications. It combines the deployment simplicity of monoliths with the organizational benefits of microservices through well-defined module boundaries.
+
+## Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Playground.Api (Host)                    │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │  AddModules() → ConfigureServices() → MapEndpoints()  │  │
+│  └───────────────────────────────────────────────────────┘  │
+└───────────────────┬─────────────────────────────────────────┘
+                    │
+        ┌───────────┴──────────┬──────────────┐
+        ▼                      ▼              ▼
+┌──────────────┐      ┌──────────────┐  ┌──────────────┐
+│   Identity   │      │ Multitenancy │  │   Auditing   │
+│    Module    │      │    Module    │  │    Module    │
+│              │      │              │  │              │
+│ IModule impl │      │ IModule impl │  │ IModule impl │
+└──────┬───────┘      └──────┬───────┘  └──────┬───────┘
+       │                     │                 │
+       └─────────────────────┴─────────────────┘
+                             |
+                ┌────────────┴───────────┐
+                ▼                        ▼
+        ┌──────────────┐        ┌──────────────┐
+        │ BuildingBlock│        │    Shared    │
+        │   Framework  │        │  Contracts   │
+        │              │        │              │
+        │ • Core       │        │ • Identity   │
+        │ • Persistence│        │ • Multitenancy│
+        │ • Web        │        │ • Constants  │
+        │ • Caching    │        │              │
+        │ • Jobs       │        │              │
+        │ • Mailing    │        │              │
+        └──────────────┘        └──────────────┘
+```
+
+## Core Architectural Principles
+
+### 1. Modular Monolith
+
+The application is structured as independent modules that communicate through well-defined contracts:
+
+- **Identity Module**: Authentication, authorization, users, roles, groups, sessions
+- **Multitenancy Module**: Tenant management, provisioning, theme customization
+- **Auditing Module**: Audit trail for HTTP requests and domain events
+
+Each module implements the `IModule` interface:
+
+<CodeGroup>
+```csharp src/BuildingBlocks/Web/Modules/IModule.cs
+namespace FSH.Framework.Web.Modules;
+
+public interface IModule
+{
+    // DI/Options/Health/etc. — don't depend on ASP.NET types here
+    void ConfigureServices(IHostApplicationBuilder builder);
+
+    // HTTP wiring — Minimal APIs only
+    void MapEndpoints(IEndpointRouteBuilder endpoints);
+}
+```
+
+```csharp Program.cs - Module Registration
+var moduleAssemblies = new Assembly[]
+{
+    typeof(IdentityModule).Assembly,
+    typeof(MultitenancyModule).Assembly,
+    typeof(AuditingModule).Assembly
+};
+
+builder.AddModules(moduleAssemblies);
+```
+</CodeGroup>
+
+### 2. Vertical Slice Architecture
+
+Features are organized as self-contained vertical slices, not horizontal layers:
+
+```
+Modules.Identity/Features/v1/Groups/CreateGroup/
+├── CreateGroupCommandHandler.cs    ← Business logic
+├── CreateGroupCommandValidator.cs  ← Validation rules
+└── CreateGroupEndpoint.cs          ← HTTP endpoint
+
+Modules.Identity.Contracts/v1/Groups/CreateGroup/
+└── CreateGroupCommand.cs           ← Contract (ICommand<T>)
+```
+
+Each feature contains:
+- **Command/Query**: Request DTO implementing `ICommand<T>` or `IQuery<T>`
+- **Handler**: Business logic implementing `ICommandHandler` or `IQueryHandler`
+- **Validator**: FluentValidation rules
+- **Endpoint**: Minimal API endpoint mapping
+
+### 3. CQRS with Mediator
+
+Command Query Responsibility Segregation using the **Mediator** library (not MediatR):
+
+<CodeGroup>
+```csharp Command Example
+public sealed record CreateGroupCommand(
+    string Name,
+    string? Description,
+    bool IsDefault,
+    List<string>? RoleIds) : ICommand<GroupDto>;
+```
+
+```csharp Query Example
+public sealed record GetGroupByIdQuery(Guid Id) : IQuery<GroupDto>;
+```
+</CodeGroup>
+
+Handlers return `ValueTask<T>` (not `Task<T>`) for better performance.
+
+### 4. Domain-Driven Design
+
+Rich domain models with encapsulated behavior:
+
+- **Entities**: `BaseEntity<TId>` with domain events
+- **Aggregates**: `AggregateRoot<TId>` for consistency boundaries
+- **Value Objects**: Immutable types for domain concepts
+- **Domain Events**: `DomainEvent` for cross-aggregate communication
+
+Building blocks are located in `BuildingBlocks/Core/Domain/`.
+
+### 5. Multi-Tenancy First
+
+Built-in multi-tenancy using **Finbuckle.MultiTenant**:
+
+- **Tenant Resolution**: Header, claim, and query string strategies
+- **Data Isolation**: Database-per-tenant pattern
+- **Distributed Cache**: Cached tenant info for performance
+- **Tenant Context**: Automatic tenant tracking on entities
+
+## Key Design Decisions
+
+<CardGroup cols={2}>
+  <Card title="Minimal APIs" icon="route">
+    No controllers. All endpoints use Minimal API routing for better performance and simplicity.
+  </Card>
+  <Card title="Mediator (not MediatR)" icon="arrows-split-up-and-left">
+    Uses Mediator library with `ICommand`/`IQuery` interfaces and `ValueTask` returns.
+  </Card>
+  <Card title="Database Per Tenant" icon="database">
+    Each tenant gets its own database for maximum isolation and security.
+  </Card>
+  <Card title="Outbox Pattern" icon="inbox-out">
+    Transactional outbox ensures reliable event publishing with Hangfire.
+  </Card>
+</CardGroup>
+
+## Technology Stack
+
+<Steps>
+  <Step title=".NET 10">
+    Latest .NET features including native AOT support and improved performance.
+  </Step>
+  <Step title="Entity Framework Core">
+    Code-first database design with PostgreSQL support.
+  </Step>
+  <Step title="Mediator">
+    In-process messaging for CQRS commands and queries.
+  </Step>
+  <Step title="FluentValidation">
+    Declarative validation rules for all commands and queries.
+  </Step>
+  <Step title="Finbuckle.MultiTenant">
+    Production-ready multi-tenancy with multiple resolution strategies.
+  </Step>
+  <Step title="Hangfire">
+    Background jobs for outbox processing and scheduled tasks.
+  </Step>
+</Steps>
+
+## Module Communication
+
+Modules communicate through:
+
+1. **Shared Contracts**: Published DTOs and interfaces in `.Contracts` projects
+2. **Integration Events**: Published to outbox, consumed asynchronously
+3. **Direct Service Calls**: For synchronous operations within bounded contexts
+
+<Note>
+  Modules must never reference other module implementations, only their contracts. This enforces loose coupling.
+</Note>
+
+## Building Blocks
+
+The framework provides 11 building block packages:
+
+| Package | Purpose |
+|---------|--------|
+| `Core` | Domain primitives, exceptions, context abstractions |
+| `Persistence` | DbContext base, repositories, interceptors |
+| `Web` | Module loader, middleware, exception handling |
+| `Caching` | Distributed and hybrid cache services |
+| `Jobs` | Hangfire integration for background tasks |
+| `Mailing` | Email templating and SMTP configuration |
+| `Storage` | File storage abstraction (local, cloud) |
+| `Eventing` | Domain events and outbox pattern |
+| `Shared` | Common constants and DTOs |
+| `Blazor.UI` | Blazor components and theming |
+| `OpenAPI` | Swagger/OpenAPI documentation |
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Modular Monolith" href="/architecture/modular-monolith" icon="cube">
+    Learn how modules are loaded and isolated
+  </Card>
+  <Card title="Vertical Slices" href="/architecture/vertical-slices" icon="layer-group">
+    Understand the feature folder structure
+  </Card>
+  <Card title="CQRS & Mediator" href="/architecture/cqrs-mediator" icon="arrows-split-up-and-left">
+    Deep dive into commands, queries, and handlers
+  </Card>
+  <Card title="Domain-Driven Design" href="/architecture/domain-driven-design" icon="diagram-project">
+    Explore entities, aggregates, and domain events
+  </Card>
+</CardGroup>

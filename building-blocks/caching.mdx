@@ -1,0 +1,468 @@
+---
+title: Caching Building Block
+description: Hybrid L1/L2 distributed caching with Redis support
+icon: bolt
+---
+
+## Overview
+
+The **Caching** building block provides a hybrid L1/L2 cache implementation with Redis support. It combines in-memory (L1) and distributed (L2) caching for optimal performance.
+
+<Note>
+  The hybrid cache uses **in-memory cache (L1)** for hot data and **Redis (L2)** for shared cache across instances.
+</Note>
+
+## Key Components
+
+### ICacheService
+
+Main abstraction for caching operations:
+
+```csharp ICacheService.cs
+namespace FSH.Framework.Caching;
+
+public interface ICacheService
+{
+    // Async operations
+    Task<T?> GetItemAsync<T>(string key, CancellationToken ct = default);
+    Task SetItemAsync<T>(string key, T value, TimeSpan? sliding = default, CancellationToken ct = default);
+    Task RemoveItemAsync(string key, CancellationToken ct = default);
+    Task RefreshItemAsync(string key, CancellationToken ct = default);
+
+    // Sync operations
+    T? GetItem<T>(string key);
+    void SetItem<T>(string key, T value, TimeSpan? sliding = default);
+    void RemoveItem(string key);
+    void RefreshItem(string key);
+}
+```
+
+### CachingOptions
+
+Configuration for caching behavior:
+
+```csharp CachingOptions.cs
+namespace FSH.Framework.Caching;
+
+public sealed class CachingOptions
+{
+    /// <summary>Redis connection string. If empty, falls back to in-memory.</summary>
+    public string Redis { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Enable SSL for Redis connection. If null, uses connection string default.
+    /// Set to true when using Aspire or cloud Redis that requires SSL.
+    /// </summary>
+    public bool? EnableSsl { get; set; }
+
+    /// <summary>Default sliding expiration if caller doesn't specify.</summary>
+    public TimeSpan? DefaultSlidingExpiration { get; set; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>Default absolute expiration (cap).</summary>
+    public TimeSpan? DefaultAbsoluteExpiration { get; set; } = TimeSpan.FromMinutes(15);
+
+    /// <summary>Optional prefix (env/tenant/app) applied to all keys.</summary>
+    public string? KeyPrefix { get; set; } = "fsh_";
+}
+```
+
+## Registration
+
+<CodeGroup>
+```csharp Program.cs (Services)
+using FSH.Framework.Caching;
+
+builder.Services.AddHeroCaching(builder.Configuration);
+
+// Or via platform registration
+builder.AddHeroPlatform(options =>
+{
+    options.EnableCaching = true; // Enables caching
+});
+```
+
+```json appsettings.json (Configuration)
+{
+  "CachingOptions": {
+    "Redis": "localhost:6379",
+    "EnableSsl": false,
+    "DefaultSlidingExpiration": "00:05:00",
+    "DefaultAbsoluteExpiration": "00:15:00",
+    "KeyPrefix": "fsh_"
+  }
+}
+```
+
+```json appsettings.Production.json (Redis Cloud)
+{
+  "CachingOptions": {
+    "Redis": "redis-cloud.example.com:6380,password=secret",
+    "EnableSsl": true,
+    "DefaultSlidingExpiration": "00:10:00",
+    "DefaultAbsoluteExpiration": "01:00:00"
+  }
+}
+```
+</CodeGroup>
+
+## Usage Examples
+
+### Basic Caching
+
+```csharp GetProductHandler.cs
+using FSH.Framework.Caching;
+
+public sealed class GetProductHandler : IQueryHandler<GetProductQuery, ProductDto?>
+{
+    private readonly CatalogDbContext _db;
+    private readonly ICacheService _cache;
+
+    public GetProductHandler(CatalogDbContext db, ICacheService cache)
+    {
+        _db = db;
+        _cache = cache;
+    }
+
+    public async ValueTask<ProductDto?> Handle(GetProductQuery query, CancellationToken ct)
+    {
+        var cacheKey = $"product:{query.Id}";
+
+        // Try to get from cache
+        var cached = await _cache.GetItemAsync<ProductDto>(cacheKey, ct);
+        if (cached is not null)
+        {
+            return cached;
+        }
+
+        // Load from database
+        var product = await _db.Products
+            .Where(p => p.Id == query.Id)
+            .Select(p => new ProductDto
+            {
+                Id = p.Id,
+                Name = p.Name,
+                Price = p.Price
+            })
+            .FirstOrDefaultAsync(ct);
+
+        // Cache for 5 minutes (sliding)
+        if (product is not null)
+        {
+            await _cache.SetItemAsync(cacheKey, product, TimeSpan.FromMinutes(5), ct);
+        }
+
+        return product;
+    }
+}
+```
+
+### Cache-Aside Pattern
+
+```csharp ProductService.cs
+using FSH.Framework.Caching;
+
+public sealed class ProductService
+{
+    private readonly CatalogDbContext _db;
+    private readonly ICacheService _cache;
+
+    public async Task<List<ProductDto>> GetFeaturedProductsAsync(CancellationToken ct)
+    {
+        const string cacheKey = "products:featured";
+
+        // Try cache first
+        var cached = await _cache.GetItemAsync<List<ProductDto>>(cacheKey, ct);
+        if (cached is not null)
+        {
+            return cached;
+        }
+
+        // Load from database
+        var products = await _db.Products
+            .Where(p => p.IsFeatured)
+            .OrderByDescending(p => p.CreatedOnUtc)
+            .Take(10)
+            .Select(p => new ProductDto { /* ... */ })
+            .ToListAsync(ct);
+
+        // Cache for 10 minutes
+        await _cache.SetItemAsync(cacheKey, products, TimeSpan.FromMinutes(10), ct);
+
+        return products;
+    }
+}
+```
+
+### Cache Invalidation
+
+```csharp UpdateProductHandler.cs
+using FSH.Framework.Caching;
+
+public sealed class UpdateProductHandler : ICommandHandler<UpdateProductCommand>
+{
+    private readonly CatalogDbContext _db;
+    private readonly ICacheService _cache;
+
+    public async ValueTask<Unit> Handle(UpdateProductCommand cmd, CancellationToken ct)
+    {
+        var product = await _db.Products.FindAsync([cmd.Id], ct)
+            ?? throw new NotFoundException($"Product {cmd.Id} not found.");
+
+        product.UpdateName(cmd.Name);
+        product.UpdatePrice(cmd.Price);
+
+        await _db.SaveChangesAsync(ct);
+
+        // Invalidate related caches
+        await _cache.RemoveItemAsync($"product:{cmd.Id}", ct);
+        await _cache.RemoveItemAsync("products:featured", ct);
+        await _cache.RemoveItemAsync($"products:category:{product.CategoryId}", ct);
+
+        return Unit.Value;
+    }
+}
+```
+
+### Tenant-Scoped Cache Keys
+
+```csharp GetTenantStatsHandler.cs
+using FSH.Framework.Caching;
+using FSH.Framework.Core.Context;
+
+public sealed class GetTenantStatsHandler : IQueryHandler<GetTenantStatsQuery, TenantStatsDto>
+{
+    private readonly ICurrentUser _currentUser;
+    private readonly ICacheService _cache;
+    private readonly AppDbContext _db;
+
+    public async ValueTask<TenantStatsDto> Handle(GetTenantStatsQuery query, CancellationToken ct)
+    {
+        var tenantId = _currentUser.GetTenantId() ?? "default";
+        var cacheKey = $"tenant:{tenantId}:stats";
+
+        var cached = await _cache.GetItemAsync<TenantStatsDto>(cacheKey, ct);
+        if (cached is not null) return cached;
+
+        var stats = await CalculateStatsAsync(tenantId, ct);
+
+        await _cache.SetItemAsync(cacheKey, stats, TimeSpan.FromMinutes(15), ct);
+        return stats;
+    }
+}
+```
+
+### Synchronous Operations
+
+<Note>
+  Use synchronous methods sparingly. Async methods are preferred for scalability.
+</Note>
+
+```csharp CacheHelper.cs
+using FSH.Framework.Caching;
+
+public sealed class CacheHelper
+{
+    private readonly ICacheService _cache;
+
+    public string GetOrCreateToken(string userId)
+    {
+        var cacheKey = $"token:{userId}";
+
+        // Try to get from cache
+        var token = _cache.GetItem<string>(cacheKey);
+        if (token is not null)
+        {
+            return token;
+        }
+
+        // Generate new token
+        token = Guid.NewGuid().ToString("N");
+
+        // Cache for 1 hour
+        _cache.SetItem(cacheKey, token, TimeSpan.FromHours(1));
+
+        return token;
+    }
+}
+```
+
+## Cache Strategies
+
+### 1. Cache-Aside (Lazy Loading)
+
+Most common pattern — application manages cache:
+
+<Steps>
+  <Step title="Check Cache">
+    Try to read from cache first.
+  </Step>
+  <Step title="Load from Source">
+    If cache miss, load from database.
+  </Step>
+  <Step title="Populate Cache">
+    Store the loaded data in cache for future requests.
+  </Step>
+</Steps>
+
+### 2. Write-Through
+
+Update cache when writing to database:
+
+```csharp
+await _db.SaveChangesAsync(ct);
+await _cache.SetItemAsync(cacheKey, updatedData, ct);
+```
+
+### 3. Write-Behind (Invalidation)
+
+Invalidate cache when writing to database:
+
+```csharp
+await _db.SaveChangesAsync(ct);
+await _cache.RemoveItemAsync(cacheKey, ct);
+```
+
+## Best Practices
+
+<Steps>
+  <Step title="Use Descriptive Keys">
+    Use namespaced keys: `product:{id}`, `tenant:{tenantId}:orders`.
+  </Step>
+  <Step title="Set Appropriate TTLs">
+    Use sliding expiration for frequently accessed data, absolute expiration for time-sensitive data.
+  </Step>
+  <Step title="Invalidate on Write">
+    Always invalidate or update cache when modifying data.
+  </Step>
+  <Step title="Handle Cache Misses">
+    Always have fallback logic when cache is unavailable.
+  </Step>
+  <Step title="Monitor Cache Hit Rates">
+    Track cache effectiveness using telemetry.
+  </Step>
+</Steps>
+
+## Hybrid Cache Architecture
+
+```
+Request
+  ↓
+L1 (Memory Cache) — Fast, per-instance
+  ↓ (miss)
+L2 (Redis) — Shared, distributed
+  ↓ (miss)
+Database — Source of truth
+```
+
+### L1 Cache (In-Memory)
+
+- **Scope**: Single application instance
+- **Speed**: Fastest (nanoseconds)
+- **Use Case**: Hot data, session state
+
+### L2 Cache (Redis)
+
+- **Scope**: Shared across all instances
+- **Speed**: Fast (milliseconds)
+- **Use Case**: Distributed cache, session sharing
+
+## Configuration Options
+
+### Local Development (In-Memory)
+
+```json appsettings.Development.json
+{
+  "CachingOptions": {
+    "Redis": "",  // Empty = fallback to in-memory
+    "DefaultSlidingExpiration": "00:05:00"
+  }
+}
+```
+
+### Docker Compose (Redis)
+
+```yaml docker-compose.yml
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+```
+
+```json appsettings.json
+{
+  "CachingOptions": {
+    "Redis": "localhost:6379"
+  }
+}
+```
+
+### Aspire (Redis with SSL)
+
+```csharp AppHost/Program.cs
+var redis = builder.AddRedis("cache")
+    .WithRedisCommander();
+
+var api = builder.AddProject<Projects.Api>("api")
+    .WithReference(redis);
+```
+
+```json appsettings.json
+{
+  "CachingOptions": {
+    "EnableSsl": true  // Aspire Redis requires SSL
+  }
+}
+```
+
+## Troubleshooting
+
+### Redis Connection Failed
+
+<Note>
+  If Redis is unavailable, the system falls back to in-memory cache automatically.
+</Note>
+
+```bash
+# Test Redis connection
+redis-cli -h localhost -p 6379 ping
+
+# Check Redis logs
+docker logs redis
+```
+
+### Cache Not Working
+
+```csharp
+// Verify cache is registered
+var cache = app.Services.GetRequiredService<ICacheService>();
+
+// Test set/get
+await cache.SetItemAsync("test", "value", ct);
+var value = await cache.GetItemAsync<string>("test", ct);
+```
+
+## Package Reference
+
+```xml YourModule.csproj
+<ItemGroup>
+  <ProjectReference Include="..\..\BuildingBlocks\Caching\FSH.Framework.Caching.csproj" />
+</ItemGroup>
+```
+
+## Related Resources
+
+<CardGroup cols={2}>
+  <Card title="Jobs Building Block" icon="clock" href="/building-blocks/jobs">
+    Background jobs for cache warming
+  </Card>
+  <Card title="Web Building Block" icon="globe" href="/building-blocks/web">
+    Response caching and output caching
+  </Card>
+  <Card title="Redis Documentation" icon="book" href="https://redis.io/docs/">
+    Official Redis documentation
+  </Card>
+  <Card title="ASP.NET Caching" icon="book" href="https://learn.microsoft.com/en-us/aspnet/core/performance/caching/">
+    Microsoft caching best practices
+  </Card>
+</CardGroup>

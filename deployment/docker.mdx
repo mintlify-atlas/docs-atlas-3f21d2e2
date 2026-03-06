@@ -1,0 +1,638 @@
+---
+title: Docker Deployment
+description: Containerize and deploy the FullStackHero .NET Starter Kit using Docker and Docker Compose
+icon: docker
+---
+
+The FullStackHero .NET Starter Kit uses .NET's built-in container publishing capabilities for seamless Docker deployments. No Dockerfile needed—just publish directly to a container image.
+
+## Container Publishing
+
+.NET 10 includes native support for building container images without a Dockerfile. The project files are pre-configured for containerization:
+
+<CodeGroup>
+```xml Playground.Api.csproj
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <RootNamespace>FSH.Playground.Api</RootNamespace>
+    <AssemblyName>FSH.Playground.Api</AssemblyName>
+    
+    <!-- Container configuration -->
+    <ContainerPort>8080</ContainerPort>
+    <ContainerUser>root</ContainerUser>
+    <ContainerRepository>fsh-playground-api</ContainerRepository>
+    <PublishProfile>DefaultContainer</PublishProfile>
+  </PropertyGroup>
+</Project>
+```
+
+```xml Playground.Blazor.csproj
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <RootNamespace>FSH.Playground.Blazor</RootNamespace>
+    <AssemblyName>FSH.Playground.Blazor</AssemblyName>
+    
+    <!-- Container configuration -->
+    <ContainerPort>8080</ContainerPort>
+    <ContainerUser>root</ContainerUser>
+    <ContainerRepository>fsh-playground-blazor</ContainerRepository>
+    <PublishProfile>DefaultContainer</PublishProfile>
+  </PropertyGroup>
+</Project>
+```
+</CodeGroup>
+
+### Build Container Images
+
+Publish the API and Blazor projects as container images:
+
+<Steps>
+  <Step title="Build the API Container">
+    ```bash
+    dotnet publish src/Playground/Playground.Api/Playground.Api.csproj \
+      -c Release \
+      -r linux-x64 \
+      -p:PublishProfile=DefaultContainer \
+      -p:ContainerImageTags='"latest;1.0.0"'
+    ```
+    
+    This creates a container image `fsh-playground-api:latest` using the Microsoft-provided ASP.NET runtime image.
+  </Step>
+
+  <Step title="Build the Blazor Container">
+    ```bash
+    dotnet publish src/Playground/Playground.Blazor/Playground.Blazor.csproj \
+      -c Release \
+      -r linux-x64 \
+      -p:PublishProfile=DefaultContainer \
+      -p:ContainerImageTags='"latest;1.0.0"'
+    ```
+    
+    This creates a container image `fsh-playground-blazor:latest`.
+  </Step>
+
+  <Step title="Verify Images">
+    ```bash
+    docker images | grep fsh-playground
+    ```
+    
+    You should see:
+    ```
+    fsh-playground-api      latest    abc123...   10 seconds ago   250MB
+    fsh-playground-blazor   latest    def456...   15 seconds ago   180MB
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  The base image is automatically selected based on your runtime (`linux-x64` → `mcr.microsoft.com/dotnet/aspnet:10.0`). No Dockerfile required.
+</Note>
+
+### Multi-Stage Build (Alternative with Dockerfile)
+
+If you prefer a traditional Dockerfile for more control:
+
+<CodeGroup>
+```dockerfile Dockerfile.api
+# Build stage
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+
+# Copy project files and restore dependencies
+COPY ["src/Playground/Playground.Api/Playground.Api.csproj", "Playground.Api/"]
+COPY ["src/BuildingBlocks/", "BuildingBlocks/"]
+COPY ["src/Modules/", "Modules/"]
+COPY ["src/Playground/Migrations.PostgreSQL/", "Migrations.PostgreSQL/"]
+COPY ["Directory.Build.props", "Directory.Packages.props", "./"]
+
+RUN dotnet restore "Playground.Api/Playground.Api.csproj"
+
+# Copy source code and build
+COPY src/ .
+WORKDIR "/src/Playground.Api"
+RUN dotnet build "Playground.Api.csproj" -c Release -o /app/build
+
+# Publish stage
+FROM build AS publish
+RUN dotnet publish "Playground.Api.csproj" -c Release -o /app/publish --no-restore
+
+# Runtime stage
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
+WORKDIR /app
+EXPOSE 8080
+
+COPY --from=publish /app/publish .
+ENTRYPOINT ["dotnet", "FSH.Playground.Api.dll"]
+```
+
+```dockerfile Dockerfile.blazor
+# Build stage
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+
+# Copy project files and restore dependencies
+COPY ["src/Playground/Playground.Blazor/Playground.Blazor.csproj", "Playground.Blazor/"]
+COPY ["src/BuildingBlocks/Blazor.UI/", "Blazor.UI/"]
+COPY ["src/Modules/", "Modules/"]
+COPY ["Directory.Build.props", "Directory.Packages.props", "./"]
+
+RUN dotnet restore "Playground.Blazor/Playground.Blazor.csproj"
+
+# Copy source code and build
+COPY src/ .
+WORKDIR "/src/Playground.Blazor"
+RUN dotnet build "Playground.Blazor.csproj" -c Release -o /app/build
+
+# Publish stage
+FROM build AS publish
+RUN dotnet publish "Playground.Blazor.csproj" -c Release -o /app/publish --no-restore
+
+# Runtime stage
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
+WORKDIR /app
+EXPOSE 8080
+
+COPY --from=publish /app/publish .
+ENTRYPOINT ["dotnet", "FSH.Playground.Blazor.dll"]
+```
+</CodeGroup>
+
+Build with Docker:
+```bash
+docker build -f Dockerfile.api -t fsh-playground-api:latest .
+docker build -f Dockerfile.blazor -t fsh-playground-blazor:latest .
+```
+
+## Docker Compose Setup
+
+Create a complete development stack with API, Blazor UI, PostgreSQL, Redis, and observability tools.
+
+### Basic Compose Configuration
+
+<CodeGroup>
+```yaml docker-compose.yml
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: fsh-postgres
+    environment:
+      POSTGRES_DB: fsh
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - fsh-network
+
+  # Redis Cache
+  redis:
+    image: redis:7.1-alpine
+    container_name: fsh-redis
+    command: redis-server --requirepass password --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - fsh-network
+
+  # API Service
+  api:
+    image: fsh-playground-api:latest
+    container_name: fsh-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ASPNETCORE_URLS=http://+:8080
+      - DatabaseOptions__Provider=POSTGRESQL
+      - DatabaseOptions__ConnectionString=Host=postgres;Port=5432;Database=fsh;Username=postgres;Password=password;Pooling=true
+      - DatabaseOptions__MigrationsAssembly=FSH.Playground.Migrations.PostgreSQL
+      - CachingOptions__Redis=redis:6379,password=password
+      - OriginOptions__OriginUrl=http://localhost:7140
+      - CorsOptions__AllowAll=true
+      - JwtOptions__SigningKey=your-secret-key-min-32-characters-long
+      - JwtOptions__Issuer=fsh.local
+      - JwtOptions__Audience=fsh.clients
+      - Storage__Provider=local
+    ports:
+      - "5285:8080"
+    volumes:
+      - api-uploads:/app/wwwroot/uploads
+    networks:
+      - fsh-network
+
+  # Blazor UI
+  blazor:
+    image: fsh-playground-blazor:latest
+    container_name: fsh-blazor
+    depends_on:
+      - api
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ASPNETCORE_URLS=http://+:8080
+      - Api__BaseUrl=http://localhost:5285
+    ports:
+      - "7140:8080"
+    networks:
+      - fsh-network
+
+networks:
+  fsh-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
+  api-uploads:
+```
+
+```yaml docker-compose.override.yml
+# Development overrides
+version: '3.8'
+
+services:
+  api:
+    environment:
+      - OpenApiOptions__Enabled=true
+      - OpenTelemetryOptions__Enabled=true
+      - OpenTelemetryOptions__Exporter__Otlp__Enabled=false
+      - MultitenancyOptions__RunTenantMigrationsOnStartup=true
+      - MultitenancyOptions__AutoProvisionOnStartup=true
+    volumes:
+      - ./src/Playground/Playground.Api/appsettings.Development.json:/app/appsettings.Development.json:ro
+
+  blazor:
+    volumes:
+      - ./src/Playground/Playground.Blazor/appsettings.Development.json:/app/appsettings.Development.json:ro
+```
+</CodeGroup>
+
+### Run the Stack
+
+<Steps>
+  <Step title="Build Container Images">
+    Build both API and Blazor images (if not already built):
+    ```bash
+    dotnet publish src/Playground/Playground.Api/Playground.Api.csproj -c Release -r linux-x64 -p:PublishProfile=DefaultContainer
+    dotnet publish src/Playground/Playground.Blazor/Playground.Blazor.csproj -c Release -r linux-x64 -p:PublishProfile=DefaultContainer
+    ```
+  </Step>
+
+  <Step title="Start Services">
+    ```bash
+    docker compose up -d
+    ```
+    
+    This starts Postgres, Redis, API, and Blazor in detached mode.
+  </Step>
+
+  <Step title="View Logs">
+    ```bash
+    docker compose logs -f api
+    ```
+    
+    Watch for successful database migrations and service startup.
+  </Step>
+
+  <Step title="Access Applications">
+    - **API**: http://localhost:5285
+    - **Swagger/Scalar**: http://localhost:5285/scalar
+    - **Blazor UI**: http://localhost:7140
+    - **Health Checks**: http://localhost:5285/health/live
+  </Step>
+</Steps>
+
+### Production Compose Configuration
+
+For production deployments, use explicit secrets and resource limits:
+
+```yaml docker-compose.prod.yml
+version: '3.8'
+
+services:
+  postgres:
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
+
+  redis:
+    command: redis-server --requirepass /run/secrets/redis_password --appendonly yes
+    secrets:
+      - redis_password
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+
+  api:
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - DatabaseOptions__ConnectionString=Host=postgres;Port=5432;Database=fsh;Username=postgres;Password=/run/secrets/postgres_password;Pooling=true;SSL Mode=Require
+      - JwtOptions__SigningKey=/run/secrets/jwt_signing_key
+      - OpenApiOptions__Enabled=false
+      - RateLimitingOptions__Enabled=true
+    secrets:
+      - postgres_password
+      - jwt_signing_key
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+
+  blazor:
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password.txt
+  redis_password:
+    file: ./secrets/redis_password.txt
+  jwt_signing_key:
+    file: ./secrets/jwt_signing_key.txt
+```
+
+Run production stack:
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+```
+
+## Container Image Tags
+
+The CI/CD pipeline automatically builds and tags container images:
+
+<Tabs>
+  <Tab title="Development (develop branch)">
+    Images are tagged with `dev-{SHA}` and `dev-latest`:
+    
+    ```yaml
+    ghcr.io/fullstackhero/fsh-playground-api:dev-abc1234
+    ghcr.io/fullstackhero/fsh-playground-api:dev-latest
+    ```
+    
+    **GitHub Actions Workflow:**
+    ```yaml
+    - name: Publish API container image
+      run: |
+        dotnet publish src/Playground/Playground.Api/Playground.Api.csproj \
+          -c Release -r linux-x64 \
+          -p:PublishProfile=DefaultContainer \
+          -p:ContainerRepository=ghcr.io/${{ github.repository_owner }}/fsh-playground-api \
+          -p:ContainerImageTags='"dev-${{ github.sha }};dev-latest"'
+    ```
+  </Tab>
+
+  <Tab title="Release (tags or main branch)">
+    Images are tagged with version and `latest`:
+    
+    ```yaml
+    ghcr.io/fullstackhero/fsh-playground-api:1.0.0
+    ghcr.io/fullstackhero/fsh-playground-api:latest
+    ```
+    
+    Triggered by:
+    - Creating a tag: `git tag v1.0.0 && git push --tags`
+    - Manual workflow dispatch with version input
+    
+    **GitHub Actions Workflow:**
+    ```yaml
+    - name: Build and push API container
+      run: |
+        dotnet publish src/Playground/Playground.Api/Playground.Api.csproj \
+          -c Release -r linux-x64 \
+          -p:PublishProfile=DefaultContainer \
+          -p:ContainerRepository=ghcr.io/${{ github.repository_owner }}/fsh-playground-api \
+          -p:ContainerImageTags='"${{ steps.version.outputs.version }};latest"'
+        docker push ghcr.io/${{ github.repository_owner }}/fsh-playground-api:${{ steps.version.outputs.version }}
+        docker push ghcr.io/${{ github.repository_owner }}/fsh-playground-api:latest
+    ```
+  </Tab>
+</Tabs>
+
+## Container Registries
+
+### GitHub Container Registry (GHCR)
+
+The project is configured to publish to GHCR by default:
+
+```bash
+# Login to GHCR
+echo $GITHUB_TOKEN | docker login ghcr.io -u USERNAME --password-stdin
+
+# Tag and push
+docker tag fsh-playground-api:latest ghcr.io/yourorg/fsh-playground-api:1.0.0
+docker push ghcr.io/yourorg/fsh-playground-api:1.0.0
+```
+
+### Amazon ECR
+
+For AWS deployments, push to ECR:
+
+```bash
+# Authenticate to ECR
+aws ecr get-login-password --region us-east-1 | \
+  docker login --username AWS --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com
+
+# Create repositories (first time only)
+aws ecr create-repository --repository-name fsh-playground-api --region us-east-1
+aws ecr create-repository --repository-name fsh-playground-blazor --region us-east-1
+
+# Tag and push
+docker tag fsh-playground-api:latest 123456789012.dkr.ecr.us-east-1.amazonaws.com/fsh-playground-api:1.0.0
+docker push 123456789012.dkr.ecr.us-east-1.amazonaws.com/fsh-playground-api:1.0.0
+```
+
+Update Terraform variables:
+```hcl
+container_registry  = "123456789012.dkr.ecr.us-east-1.amazonaws.com"
+container_image_tag = "1.0.0"
+```
+
+### Docker Hub
+
+```bash
+# Login
+docker login
+
+# Tag and push
+docker tag fsh-playground-api:latest yourorg/fsh-playground-api:1.0.0
+docker push yourorg/fsh-playground-api:1.0.0
+```
+
+## Observability Stack
+
+Add Jaeger, Prometheus, and Grafana for local observability:
+
+```yaml docker-compose.observability.yml
+version: '3.8'
+
+services:
+  # Jaeger for distributed tracing
+  jaeger:
+    image: jaegertracing/all-in-one:1.53
+    container_name: fsh-jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "16686:16686" # Jaeger UI
+    networks:
+      - fsh-network
+
+  # Prometheus for metrics
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: fsh-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - fsh-network
+
+  # Grafana for dashboards
+  grafana:
+    image: grafana/grafana:latest
+    container_name: fsh-grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    networks:
+      - fsh-network
+
+volumes:
+  prometheus-data:
+  grafana-data:
+```
+
+Update API configuration:
+```yaml
+api:
+  environment:
+    - OpenTelemetryOptions__Exporter__Otlp__Enabled=true
+    - OpenTelemetryOptions__Exporter__Otlp__Endpoint=http://jaeger:4317
+```
+
+Start observability stack:
+```bash
+docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+```
+
+Access:
+- **Jaeger UI**: http://localhost:16686
+- **Prometheus**: http://localhost:9090
+- **Grafana**: http://localhost:3000 (admin/admin)
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Database connection errors">
+    **Error**: `The remote certificate is invalid according to the validation procedure`
+    
+    **Solution**: Add `Trust Server Certificate=true` to connection string (dev only) or configure proper SSL certificates.
+    
+    ```bash
+    DatabaseOptions__ConnectionString="Host=postgres;...;SSL Mode=Require;Trust Server Certificate=true"
+    ```
+  </Accordion>
+
+  <Accordion title="Redis authentication errors">
+    **Error**: `NOAUTH Authentication required`
+    
+    **Solution**: Include password in Redis connection string:
+    ```bash
+    CachingOptions__Redis="redis:6379,password=your-password"
+    ```
+  </Accordion>
+
+  <Accordion title="API returns 503 Service Unavailable">
+    **Cause**: API is starting but health checks are failing.
+    
+    **Debug**:
+    ```bash
+    docker compose logs api
+    docker compose exec api curl http://localhost:8080/health/live
+    ```
+    
+    Check for database migration errors or missing configuration.
+  </Accordion>
+
+  <Accordion title="Blazor cannot connect to API">
+    **Cause**: Incorrect `Api__BaseUrl` configuration.
+    
+    **Solution**: Blazor needs the external API URL (from browser perspective):
+    ```yaml
+    blazor:
+      environment:
+        - Api__BaseUrl=http://localhost:5285  # NOT http://api:8080
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="AWS Deployment" icon="aws" href="/deployment/aws">
+    Deploy to production using ECS Fargate with Terraform automation
+  </Card>
+  
+  <Card title="Configuration Management" icon="gear" href="/deployment/configuration-management">
+    Master environment-specific configuration and secrets management
+  </Card>
+  
+  <Card title="Deployment Overview" icon="rocket" href="/deployment/overview">
+    Review production considerations and deployment checklist
+  </Card>
+  
+  <Card title="GitHub Actions" icon="github">
+    Set up automated CI/CD pipeline for builds and deployments
+  </Card>
+</CardGroup>

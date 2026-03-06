@@ -1,0 +1,276 @@
+---
+title: Security Audit Logs
+description: Query security-related audit events including authentication and authorization
+---
+
+## Get Security Audits
+
+Retrieve security audit events such as login attempts, token operations, and permission denials.
+
+<CodeGroup>
+```http GET /api/v1/audits/security
+GET /api/v1/audits/security?action=LoginFailed&fromUtc=2026-03-01T00:00:00Z
+```
+
+```bash cURL
+curl -X GET 'https://api.example.com/api/v1/audits/security?action=LoginFailed&fromUtc=2026-03-01T00:00:00Z' \
+  -H 'Authorization: Bearer {token}'
+```
+
+```csharp C#
+var query = new GetSecurityAuditsQuery
+{
+    Action = SecurityAction.LoginFailed,
+    FromUtc = new DateTime(2026, 3, 1, 0, 0, 0, DateTimeKind.Utc),
+    ToUtc = DateTime.UtcNow
+};
+var audits = await mediator.Send(query, cancellationToken);
+```
+</CodeGroup>
+
+### Query Parameters
+
+<ParamField query="action" type="enum">
+  Filter by security action type:
+  - `LoginSucceeded` - Successful login attempts
+  - `LoginFailed` - Failed login attempts
+  - `TokenIssued` - JWT token issuance
+  - `TokenRevoked` - JWT token revocation
+  - `PasswordChanged` - Password change events
+  - `RoleAssigned` - User role assignments
+  - `RoleRevoked` - User role removals
+  - `PermissionDenied` - Authorization failures
+  - `PolicyFailed` - Authorization policy failures
+</ParamField>
+
+<ParamField query="userId" type="string">
+  Filter by user identifier
+</ParamField>
+
+<ParamField query="tenantId" type="string">
+  Filter by tenant identifier
+</ParamField>
+
+<ParamField query="fromUtc" type="datetime">
+  Start date/time for audit events (UTC)
+</ParamField>
+
+<ParamField query="toUtc" type="datetime">
+  End date/time for audit events (UTC)
+</ParamField>
+
+### Authorization
+
+Requires `Permissions.Auditing.View` permission.
+
+### Response
+
+Returns an array of security audit summary objects.
+
+<ResponseField name="id" type="uuid">
+  Unique audit event identifier
+</ResponseField>
+
+<ResponseField name="occurredAtUtc" type="datetime">
+  When the security event occurred
+</ResponseField>
+
+<ResponseField name="eventType" type="enum">
+  Always `Security` for this endpoint
+</ResponseField>
+
+<ResponseField name="severity" type="enum">
+  Event severity: `Trace`, `Debug`, `Information`, `Warning`, `Error`, `Critical`
+</ResponseField>
+
+<ResponseField name="tenantId" type="string" nullable>
+  Associated tenant identifier
+</ResponseField>
+
+<ResponseField name="userId" type="string" nullable>
+  User who triggered the event
+</ResponseField>
+
+<ResponseField name="userName" type="string" nullable>
+  Display name of the user
+</ResponseField>
+
+<ResponseField name="traceId" type="string" nullable>
+  Distributed tracing identifier
+</ResponseField>
+
+<ResponseField name="correlationId" type="string" nullable>
+  Correlation identifier for related events
+</ResponseField>
+
+<ResponseField name="requestId" type="string" nullable>
+  HTTP request identifier
+</ResponseField>
+
+<ResponseField name="source" type="string" nullable>
+  Source system or component that generated the audit
+</ResponseField>
+
+<ResponseField name="tags" type="flags">
+  Bitwise flags for additional metadata:
+  - `PiiMasked` - Contains masked personally identifiable information
+  - `OutOfQuota` - Event occurred during quota violation
+  - `Sampled` - Event was sampled for performance
+  - `RetainedLong` - Event will be retained longer than normal
+  - `HealthCheck` - Related to health check operations
+  - `Authentication` - Authentication-related event
+  - `Authorization` - Authorization-related event
+</ResponseField>
+
+<ResponseExample>
+```json 200 Success
+[
+  {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "occurredAtUtc": "2026-03-06T14:23:15.123Z",
+    "eventType": "Security",
+    "severity": "Warning",
+    "tenantId": "acme-corp",
+    "userId": "user-123",
+    "userName": "john.doe@acme.com",
+    "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+    "correlationId": "abc123",
+    "requestId": "0HN1234567890",
+    "source": "FSH.Modules.Identity",
+    "tags": 32
+  },
+  {
+    "id": "660e9511-f3ac-52e5-b827-557766551111",
+    "occurredAtUtc": "2026-03-06T14:18:42.456Z",
+    "eventType": "Security",
+    "severity": "Information",
+    "tenantId": "acme-corp",
+    "userId": "user-456",
+    "userName": "jane.smith@acme.com",
+    "traceId": "5cg03g4688c45db7b4df030e1f1f5847",
+    "correlationId": "def456",
+    "requestId": "0HN1234567891",
+    "source": "FSH.Modules.Identity",
+    "tags": 32
+  }
+]
+```
+</ResponseExample>
+
+## Common Use Cases
+
+### Monitor Failed Login Attempts
+
+Track potential security threats by monitoring failed logins:
+
+```http
+GET /api/v1/audits/security?action=LoginFailed&fromUtc=2026-03-06T00:00:00Z
+```
+
+Look for patterns:
+- Multiple failures from same user (potential brute force)
+- Multiple failures from same IP (potential attack)
+- Failures outside business hours
+
+### Track Permission Denials
+
+Identify authorization issues or potential privilege escalation attempts:
+
+```http
+GET /api/v1/audits/security?action=PermissionDenied&userId=user-123
+```
+
+### Audit Administrative Changes
+
+Monitor role assignments and revocations:
+
+```http
+GET /api/v1/audits/security?action=RoleAssigned&fromUtc=2026-03-01T00:00:00Z
+```
+
+### Investigate User Activity
+
+Get all security events for a specific user:
+
+```http
+GET /api/v1/audits/security?userId=user-123&fromUtc=2026-03-01T00:00:00Z
+```
+
+### Tenant Security Overview
+
+Review security events for a specific tenant:
+
+```http
+GET /api/v1/audits/security?tenantId=acme-corp&fromUtc=2026-03-01T00:00:00Z
+```
+
+## Security Action Types
+
+<AccordionGroup>
+  <Accordion title="LoginSucceeded" icon="circle-check">
+    Recorded when a user successfully authenticates.
+    
+    **Severity:** Information  
+    **Use:** Track user access patterns, login times, device usage
+  </Accordion>
+
+  <Accordion title="LoginFailed" icon="circle-xmark">
+    Recorded when authentication fails (wrong password, non-existent user, etc.).
+    
+    **Severity:** Warning  
+    **Use:** Detect brute force attacks, identify account issues
+  </Accordion>
+
+  <Accordion title="TokenIssued" icon="key">
+    Recorded when a JWT token is issued to a user.
+    
+    **Severity:** Information  
+    **Use:** Track token lifecycle, audit API access
+  </Accordion>
+
+  <Accordion title="TokenRevoked" icon="ban">
+    Recorded when a token is explicitly revoked before expiration.
+    
+    **Severity:** Information  
+    **Use:** Track forced logouts, security incident response
+  </Accordion>
+
+  <Accordion title="PasswordChanged" icon="lock">
+    Recorded when a user changes their password.
+    
+    **Severity:** Information  
+    **Use:** Audit password policy compliance, detect compromised accounts
+  </Accordion>
+
+  <Accordion title="RoleAssigned" icon="user-plus">
+    Recorded when a role is assigned to a user.
+    
+    **Severity:** Information  
+    **Use:** Track permission changes, audit administrative actions
+  </Accordion>
+
+  <Accordion title="RoleRevoked" icon="user-minus">
+    Recorded when a role is removed from a user.
+    
+    **Severity:** Information  
+    **Use:** Track permission changes, audit administrative actions
+  </Accordion>
+
+  <Accordion title="PermissionDenied" icon="shield-xmark">
+    Recorded when authorization fails due to missing permissions.
+    
+    **Severity:** Warning  
+    **Use:** Detect privilege escalation attempts, identify permission gaps
+  </Accordion>
+
+  <Accordion title="PolicyFailed" icon="exclamation-triangle">
+    Recorded when a custom authorization policy fails.
+    
+    **Severity:** Warning  
+    **Use:** Audit complex authorization rules, debug policy issues
+  </Accordion>
+</AccordionGroup>
+
+<Info>
+  Security audits are automatically tagged with the `Authentication` or `Authorization` flag for quick filtering.
+</Info>

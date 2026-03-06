@@ -1,0 +1,535 @@
+---
+title: 'Multitenancy Module'
+description: 'Multi-tenant architecture with database-per-tenant isolation'
+icon: 'building'
+---
+
+## Overview
+
+The Multitenancy module provides complete tenant isolation using the database-per-tenant pattern via Finbuckle.MultiTenant. Each tenant gets its own dedicated database, ensuring data isolation and customizable schemas.
+
+**Module Order:** `200` (loads after Identity)
+
+**API Base Path:** `/api/v1/tenants`
+
+## Features
+
+<CardGroup cols={2}>
+  <Card title="Tenant Provisioning" icon="plus">
+    Automated tenant creation with database and user setup
+  </Card>
+  
+  <Card title="Database Isolation" icon="database">
+    Separate database per tenant with automatic migrations
+  </Card>
+  
+  <Card title="Tenant Resolution" icon="route">
+    Multi-strategy resolution via headers, claims, or query params
+  </Card>
+  
+  <Card title="Theme Customization" icon="palette">
+    Per-tenant branding and theme configuration
+  </Card>
+</CardGroup>
+
+## Implementation
+
+The module is defined in `MultitenancyModule.cs` (multitenancy/Modules.Multitenancy):
+
+```csharp
+namespace FSH.Modules.Multitenancy;
+
+public sealed class MultitenancyModule : IModule
+{
+    public void ConfigureServices(IHostApplicationBuilder builder)
+    {
+        // Configuration
+        builder.Services.AddOptions<MultitenancyOptions>()
+            .Bind(builder.Configuration.GetSection(nameof(MultitenancyOptions)));
+        
+        // Services
+        builder.Services.AddScoped<ITenantService, TenantService>();
+        builder.Services.AddScoped<ITenantThemeService, TenantThemeService>();
+        builder.Services.AddTransient<IConnectionStringValidator, ConnectionStringValidator>();
+        
+        // Provisioning
+        builder.Services.AddScoped<ITenantProvisioningService, TenantProvisioningService>();
+        builder.Services.AddTransient<TenantProvisioningJob>();
+        builder.Services.AddHostedService<TenantAutoProvisioningHostedService>();
+        
+        // Database
+        builder.Services.AddHeroDbContext<TenantDbContext>();
+        
+        // Finbuckle MultiTenant configuration
+        builder.Services
+            .AddMultiTenant<AppTenantInfo>(options =>
+            {
+                options.Events.OnTenantResolveCompleted = async context =>
+                {
+                    // Cache tenant info in distributed cache
+                    if (context.MultiTenantContext.StoreInfo?.StoreType != typeof(DistributedCacheStore<AppTenantInfo>))
+                    {
+                        var sp = ((HttpContext)context.Context!).RequestServices;
+                        var distributedStore = sp
+                            .GetRequiredService<IEnumerable<IMultiTenantStore<AppTenantInfo>>>()
+                            .FirstOrDefault(s => s.GetType() == typeof(DistributedCacheStore<AppTenantInfo>));
+                        
+                        await distributedStore!.AddAsync(context.MultiTenantContext.TenantInfo!);
+                    }
+                };
+            })
+            .WithClaimStrategy(ClaimConstants.Tenant)
+            .WithHeaderStrategy(MultitenancyConstants.Identifier)
+            .WithDelegateStrategy(async context =>
+            {
+                if (context is not HttpContext httpContext) return null;
+                
+                if (!httpContext.Request.Query.TryGetValue("tenant", out var tenantIdentifier) ||
+                    string.IsNullOrEmpty(tenantIdentifier))
+                    return null;
+                
+                return await Task.FromResult(tenantIdentifier.ToString());
+            })
+            .WithDistributedCacheStore(TimeSpan.FromMinutes(60))
+            .WithStore<EFCoreStore<TenantDbContext, AppTenantInfo>>(ServiceLifetime.Scoped);
+        
+        // Health checks
+        builder.Services.AddHealthChecks()
+            .AddDbContextCheck<TenantDbContext>(
+                name: "db:multitenancy",
+                failureStatus: HealthStatus.Unhealthy)
+            .AddCheck<TenantMigrationsHealthCheck>(
+                name: "db:tenants-migrations",
+                failureStatus: HealthStatus.Healthy);
+    }
+    
+    public void MapEndpoints(IEndpointRouteBuilder endpoints)
+    {
+        var versionSet = endpoints.NewApiVersionSet()
+            .HasApiVersion(new ApiVersion(1))
+            .ReportApiVersions()
+            .Build();
+        
+        var group = endpoints.MapGroup("api/v{version:apiVersion}/tenants")
+            .WithTags("Tenants")
+            .WithApiVersionSet(versionSet);
+            
+        // Tenant management
+        CreateTenantEndpoint.Map(group);
+        GetTenantsEndpoint.Map(group);
+        GetTenantStatusEndpoint.Map(group);
+        ChangeTenantActivationEndpoint.Map(group);
+        UpgradeTenantEndpoint.Map(group);
+        
+        // Provisioning
+        GetTenantProvisioningStatusEndpoint.Map(group);
+        RetryTenantProvisioningEndpoint.Map(group);
+        
+        // Theme
+        GetTenantThemeEndpoint.Map(group);
+        UpdateTenantThemeEndpoint.Map(group);
+        ResetTenantThemeEndpoint.Map(group);
+    }
+}
+```
+
+## Tenant Resolution
+
+The module uses multiple strategies to resolve the current tenant from incoming requests:
+
+### 1. Claim Strategy
+
+Resolves tenant from JWT token claim:
+
+```csharp
+.WithClaimStrategy(ClaimConstants.Tenant)
+```
+
+Expects a claim with key `tenant` in the JWT payload.
+
+### 2. Header Strategy
+
+Resolves tenant from HTTP header:
+
+```csharp
+.WithHeaderStrategy(MultitenancyConstants.Identifier)
+```
+
+Example request:
+
+```bash
+curl -H "tenant: acme-corp" https://api.example.com/api/v1/products
+```
+
+### 3. Query Parameter Strategy
+
+Resolves tenant from query string:
+
+```csharp
+.WithDelegateStrategy(async context =>
+{
+    if (context is not HttpContext httpContext) return null;
+    
+    if (!httpContext.Request.Query.TryGetValue("tenant", out var tenantIdentifier))
+        return null;
+    
+    return tenantIdentifier.ToString();
+})
+```
+
+Example request:
+
+```bash
+curl https://api.example.com/api/v1/products?tenant=acme-corp
+```
+
+### Resolution Priority
+
+Strategies are evaluated in the order they're registered:
+1. Claim (from JWT)
+2. Header
+3. Query parameter
+
+## Tenant Management
+
+### Tenant Endpoints
+
+| Method | Endpoint | Description | Permission |
+|--------|----------|-------------|------------|
+| `POST` | `/tenants` | Create new tenant | `Tenants.Create` |
+| `GET` | `/tenants` | List all tenants | `Tenants.View` |
+| `GET` | `/tenants/{id}/status` | Get tenant status | `Tenants.View` |
+| `POST` | `/tenants/{id}/activate` | Activate tenant | `Tenants.Update` |
+| `POST` | `/tenants/{id}/deactivate` | Deactivate tenant | `Tenants.Update` |
+| `POST` | `/tenants/{id}/upgrade` | Upgrade tenant database | `Tenants.Update` |
+
+### Creating a Tenant
+
+Example endpoint implementation (multitenancy/Features/v1/CreateTenant):
+
+```csharp
+public static class CreateTenantEndpoint
+{
+    public static RouteHandlerBuilder Map(this IEndpointRouteBuilder endpoints)
+    {
+        return endpoints.MapPost("/", async (
+            [FromBody] CreateTenantCommand command,
+            [FromServices] IMediator mediator)
+            => TypedResults.Ok(await mediator.Send(command)))
+            .WithName("CreateTenant")
+            .WithSummary("Create tenant")
+            .RequirePermission(MultitenancyConstants.Permissions.Create)
+            .WithDescription("Create a new tenant.")
+            .Produces<CreateTenantCommandResponse>(StatusCodes.Status200OK);
+    }
+}
+```
+
+### Tenant Service
+
+```csharp
+public interface ITenantService
+{
+    Task<TenantDto> GetByIdAsync(string tenantId, CancellationToken cancellationToken);
+    Task<List<TenantDto>> GetAllAsync(CancellationToken cancellationToken);
+    Task<string> CreateAsync(CreateTenantRequest request, CancellationToken cancellationToken);
+    Task ActivateAsync(string tenantId, CancellationToken cancellationToken);
+    Task DeactivateAsync(string tenantId, CancellationToken cancellationToken);
+    Task<bool> ExistsAsync(string identifier, CancellationToken cancellationToken);
+}
+```
+
+## Tenant Provisioning
+
+Provisioning is the automated process of setting up a new tenant:
+
+<Steps>
+  <Step title="Create Tenant Record">
+    Store tenant metadata in the `TenantDbContext`
+  </Step>
+  
+  <Step title="Create Database">
+    Create a dedicated database using the tenant's connection string
+  </Step>
+  
+  <Step title="Run Migrations">
+    Apply EF Core migrations to the tenant database
+  </Step>
+  
+  <Step title="Seed Data">
+    Initialize with default roles, permissions, and admin user
+  </Step>
+  
+  <Step title="Mark Complete">
+    Update provisioning status to `Completed`
+  </Step>
+</Steps>
+
+### Provisioning Service
+
+```csharp
+public interface ITenantProvisioningService
+{
+    Task<TenantProvisioning> StartAsync(string tenantId, CancellationToken cancellationToken);
+    
+    Task<TenantProvisioning?> GetLatestAsync(string tenantId, CancellationToken cancellationToken);
+    
+    Task<TenantProvisioningStatusDto> GetStatusAsync(string tenantId, CancellationToken cancellationToken);
+    
+    Task EnsureCanActivateAsync(string tenantId, CancellationToken cancellationToken);
+    
+    Task<string> RetryAsync(string tenantId, CancellationToken cancellationToken);
+    
+    Task<bool> MarkRunningAsync(string tenantId, string correlationId, TenantProvisioningStepName step, CancellationToken cancellationToken);
+    
+    Task MarkStepCompletedAsync(string tenantId, string correlationId, TenantProvisioningStepName step, CancellationToken cancellationToken);
+    
+    Task MarkFailedAsync(string tenantId, string correlationId, TenantProvisioningStepName step, string error, CancellationToken cancellationToken);
+    
+    Task MarkCompletedAsync(string tenantId, string correlationId, CancellationToken cancellationToken);
+}
+```
+
+### Provisioning Endpoints
+
+| Method | Endpoint | Description | Permission |
+|--------|----------|-------------|------------|
+| `GET` | `/tenants/{id}/provisioning` | Get provisioning status | `Tenants.View` |
+| `POST` | `/tenants/{id}/provisioning/retry` | Retry failed provisioning | `Tenants.Update` |
+
+### Provisioning Status
+
+Tracking provisioning progress:
+
+```csharp
+public enum TenantProvisioningStatus
+{
+    Pending,
+    Running,
+    Completed,
+    Failed
+}
+
+public enum TenantProvisioningStepName
+{
+    CreateDatabase,
+    RunMigrations,
+    SeedData
+}
+```
+
+### Auto-Provisioning
+
+Background service for automatic provisioning:
+
+```csharp
+services.AddHostedService<TenantAutoProvisioningHostedService>();
+```
+
+Polls for tenants in `Pending` status and triggers provisioning.
+
+## Database Migrations
+
+Each tenant database receives the same schema via EF Core migrations.
+
+### Migration Handling
+
+```csharp
+public interface ITenantMigrationService
+{
+    Task MigrateTenantAsync(string tenantId, CancellationToken cancellationToken);
+    Task<List<string>> GetPendingMigrationsAsync(string tenantId, CancellationToken cancellationToken);
+}
+```
+
+### Health Check
+
+Monitor migration status across all tenants:
+
+```csharp
+services.AddHealthChecks()
+    .AddCheck<TenantMigrationsHealthCheck>(
+        name: "db:tenants-migrations",
+        failureStatus: HealthStatus.Healthy);
+```
+
+## Configuration
+
+Configure multitenancy options in `appsettings.json`:
+
+```json
+{
+  "MultitenancyOptions": {
+    "DefaultConnectionString": "Server=localhost;Database=FSH_{tenant};User Id=sa;Password=***;",
+    "AllowTenantRegistration": true,
+    "RequireEmailConfirmation": true
+  }
+}
+```
+
+<Note>
+  Use `{tenant}` as a placeholder in the connection string. It will be replaced with the tenant identifier.
+</Note>
+
+### Options Model
+
+```csharp
+public class MultitenancyOptions
+{
+    public string DefaultConnectionString { get; set; } = string.Empty;
+    public bool AllowTenantRegistration { get; set; } = true;
+    public bool RequireEmailConfirmation { get; set; } = true;
+}
+```
+
+## Tenant Themes
+
+Customize branding per tenant.
+
+### Theme Endpoints
+
+| Method | Endpoint | Description | Permission |
+|--------|----------|-------------|------------|
+| `GET` | `/tenants/theme` | Get current tenant theme | Authenticated |
+| `PUT` | `/tenants/theme` | Update tenant theme | `Tenants.Update` |
+| `DELETE` | `/tenants/theme` | Reset to default theme | `Tenants.Update` |
+
+### Theme Service
+
+```csharp
+public interface ITenantThemeService
+{
+    Task<TenantThemeDto> GetAsync(string tenantId, CancellationToken cancellationToken);
+    Task UpdateAsync(string tenantId, UpdateTenantThemeRequest request, CancellationToken cancellationToken);
+    Task ResetAsync(string tenantId, CancellationToken cancellationToken);
+}
+```
+
+### Theme Model
+
+```csharp
+public record TenantThemeDto
+{
+    public string? PrimaryColor { get; init; }
+    public string? SecondaryColor { get; init; }
+    public string? LogoUrl { get; init; }
+    public string? FaviconUrl { get; init; }
+}
+```
+
+## Tenant Store
+
+Tenant information is cached for performance:
+
+```csharp
+.WithDistributedCacheStore(TimeSpan.FromMinutes(60))
+.WithStore<EFCoreStore<TenantDbContext, AppTenantInfo>>(ServiceLifetime.Scoped);
+```
+
+- **Primary Store:** EF Core (`TenantDbContext`)
+- **Cache Layer:** Distributed cache (Redis) with 60-minute TTL
+
+### AppTenantInfo
+
+```csharp
+public class AppTenantInfo : ITenantInfo
+{
+    public string Id { get; set; } = default!;
+    public string Identifier { get; set; } = default!;
+    public string Name { get; set; } = default!;
+    public string? ConnectionString { get; set; }
+    public bool IsActive { get; set; }
+    public DateTime ValidUpto { get; set; }
+}
+```
+
+## Connection String Validation
+
+Validate tenant connection strings before provisioning:
+
+```csharp
+public interface IConnectionStringValidator
+{
+    Task<bool> ValidateAsync(string connectionString, CancellationToken cancellationToken);
+}
+```
+
+## Store Initialization
+
+Ensure tenant store is ready on startup:
+
+```csharp
+services.AddHostedService<TenantStoreInitializerHostedService>();
+```
+
+Creates the `TenantDbContext` database and applies migrations if needed.
+
+## Database Context
+
+```csharp
+public class TenantDbContext : EFCoreStoreDbContext<AppTenantInfo>
+{
+    public DbSet<TenantProvisioning> TenantProvisionings { get; set; }
+    public DbSet<TenantProvisioningStep> TenantProvisioningSteps { get; set; }
+    public DbSet<TenantTheme> TenantThemes { get; set; }
+}
+```
+
+## Usage Example
+
+Access current tenant in your code:
+
+```csharp
+public class ProductService
+{
+    private readonly IMultiTenantContextAccessor<AppTenantInfo> _multiTenantContext;
+    
+    public ProductService(IMultiTenantContextAccessor<AppTenantInfo> multiTenantContext)
+    {
+        _multiTenantContext = multiTenantContext;
+    }
+    
+    public async Task<Product> CreateAsync(CreateProductRequest request)
+    {
+        var tenantId = _multiTenantContext.MultiTenantContext.TenantInfo.Id;
+        
+        // Tenant-specific logic...
+    }
+}
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Always Validate Tenant" icon="shield-check">
+    Ensure tenant context is resolved before processing requests
+  </Card>
+  
+  <Card title="Test Isolation" icon="vial">
+    Verify queries don't leak data across tenants
+  </Card>
+  
+  <Card title="Monitor Provisioning" icon="gauge">
+    Set up alerts for failed provisioning attempts
+  </Card>
+  
+  <Card title="Backup Strategy" icon="hard-drive">
+    Plan per-tenant backup and restore procedures
+  </Card>
+</CardGroup>
+
+<Warning>
+  Never expose tenant IDs to end users. Use non-guessable identifiers and validate tenant access on every request.
+</Warning>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Auditing Module" icon="clipboard-list" href="/modules/auditing">
+    Track security events and activity logs
+  </Card>
+  
+  <Card title="Creating Modules" icon="plus" href="/modules/creating-modules">
+    Build your own custom modules
+  </Card>
+</CardGroup>

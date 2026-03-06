@@ -1,0 +1,535 @@
+---
+title: Background Jobs
+description: Hangfire integration for scheduled tasks, recurring jobs, and the outbox pattern
+icon: clock
+---
+
+FullStackHero uses [Hangfire](https://www.hangfire.io/) for background job processing, enabling you to run tasks asynchronously, schedule recurring jobs, and implement the transactional outbox pattern for reliable event publishing.
+
+## Overview
+
+The background jobs system provides:
+
+- **Hangfire Integration**: Persistent, reliable background job processing
+- **Recurring Jobs**: Schedule jobs to run on a cron schedule
+- **Delayed Jobs**: Schedule jobs to run at a specific time
+- **Job Dashboard**: Web UI for monitoring and managing jobs
+- **Outbox Pattern**: Reliably publish integration events after database transactions
+- **Multi-Tenant Support**: Jobs run in the correct tenant context
+- **OpenTelemetry Tracing**: Automatic instrumentation for job execution
+
+## Configuration
+
+Configure Hangfire in `appsettings.json`:
+
+```json appsettings.json
+{
+  "HangfireOptions": {
+    "Username": "admin",
+    "Password": "Secure1234!Me",
+    "Route": "/jobs"
+  },
+  "DatabaseOptions": {
+    "Provider": "POSTGRESQL",
+    "ConnectionString": "Server=localhost;Database=fsh;User Id=postgres;Password=password",
+    "MigrationsAssembly": "FSH.Playground.Migrations.PostgreSQL"
+  }
+}
+```
+
+### HangfireOptions
+
+<ParamField path="Username" type="string" default="admin">
+  Username for accessing the Hangfire dashboard.
+</ParamField>
+
+<ParamField path="Password" type="string" required>
+  Password for accessing the Hangfire dashboard. **Use a strong password in production.**
+</ParamField>
+
+<ParamField path="Route" type="string" default="/jobs">
+  URL path for the Hangfire dashboard (e.g., `https://api.example.com/jobs`).
+</ParamField>
+
+<Note>
+  Hangfire uses the same database as your application (configured in `DatabaseOptions`).
+</Note>
+
+## Hangfire Setup
+
+Hangfire is configured in the Jobs building block:
+
+```csharp Extensions.cs
+public static IServiceCollection AddHeroJobs(this IServiceCollection services)
+{
+    ArgumentNullException.ThrowIfNull(services);
+
+    services.AddOptions<HangfireOptions>()
+        .BindConfiguration(nameof(HangfireOptions));
+
+    services.AddHangfireServer(options =>
+    {
+        options.HeartbeatInterval = TimeSpan.FromSeconds(30);
+        options.Queues = ["default", "email"];
+        options.WorkerCount = 5;
+        options.SchedulePollingInterval = TimeSpan.FromSeconds(30);
+    });
+
+    services.AddHangfire((provider, config) =>
+    {
+        var configuration = provider.GetRequiredService<IConfiguration>();
+        var dbOptions = configuration.GetSection(nameof(DatabaseOptions))
+            .Get<DatabaseOptions>() 
+            ?? throw new CustomException("Database options not found");
+
+        switch (dbOptions.Provider.ToUpperInvariant())
+        {
+            case DbProviders.PostgreSQL:
+                CleanupStaleLocks(dbOptions.ConnectionString, provider);
+                config.UsePostgreSqlStorage(o =>
+                {
+                    o.UseNpgsqlConnection(dbOptions.ConnectionString);
+                });
+                break;
+
+            case DbProviders.MSSQL:
+                config.UseSqlServerStorage(dbOptions.ConnectionString);
+                break;
+
+            default:
+                throw new CustomException(
+                    $"Hangfire storage provider {dbOptions.Provider} is not supported");
+        }
+
+        config.UseFilter(new FshJobFilter(provider));
+        config.UseFilter(new LogJobFilter());
+        config.UseFilter(new HangfireTelemetryFilter());
+    });
+
+    services.AddTransient<IJobService, HangfireService>();
+
+    return services;
+}
+```
+
+### Key Configuration
+
+<Steps>
+  <Step title="Worker Configuration">
+    Configures 5 workers processing jobs from the `default` and `email` queues.
+  </Step>
+
+  <Step title="Database Storage">
+    Uses PostgreSQL or SQL Server for persistent job storage.
+  </Step>
+
+  <Step title="Filters">
+    Applies custom filters for tenant context, logging, and OpenTelemetry tracing.
+  </Step>
+
+  <Step title="Stale Lock Cleanup">
+    Removes stale database locks from crashed instances on startup.
+  </Step>
+</Steps>
+
+## Job Dashboard
+
+Access the Hangfire dashboard at `/jobs`:
+
+```
+https://localhost:7030/jobs
+```
+
+**Login Credentials** (from `appsettings.json`):
+- Username: `admin`
+- Password: `Secure1234!Me`
+
+The dashboard provides:
+
+- **Jobs**: View all jobs (enqueued, processing, succeeded, failed)
+- **Recurring Jobs**: Manage recurring job schedules
+- **Servers**: Monitor Hangfire server instances
+- **Retries**: View and retry failed jobs
+- **Statistics**: Job execution metrics
+
+<Warning>
+  The Hangfire dashboard is protected with basic authentication. Change the default credentials in production.
+</Warning>
+
+## Using Background Jobs
+
+### Enqueue a Job
+
+Enqueue a job to run immediately:
+
+```csharp
+public class MyService
+{
+    private readonly IJobService _jobService;
+
+    public MyService(IJobService jobService)
+    {
+        _jobService = jobService;
+    }
+
+    public async Task ProcessOrderAsync(Guid orderId)
+    {
+        // Enqueue job
+        var jobId = await _jobService.EnqueueAsync<OrderProcessor>(
+            processor => processor.ProcessAsync(orderId, CancellationToken.None));
+        
+        Console.WriteLine($"Job {jobId} enqueued");
+    }
+}
+```
+
+### Schedule a Delayed Job
+
+Schedule a job to run at a specific time:
+
+```csharp
+// Run in 1 hour
+var jobId = await _jobService.ScheduleAsync<EmailService>(
+    service => service.SendReminderAsync(userId, CancellationToken.None),
+    TimeSpan.FromHours(1));
+```
+
+### Create a Recurring Job
+
+Define jobs that run on a schedule:
+
+```csharp
+// Run every day at 2:00 AM
+await _jobService.RecurringAsync<ReportGenerator>(
+    "daily-report",
+    generator => generator.GenerateAsync(CancellationToken.None),
+    Cron.Daily(2));
+```
+
+Common cron expressions:
+
+<CodeGroup>
+```csharp Every Minute
+Cron.Minutely()
+```
+
+```csharp Every Hour
+Cron.Hourly()
+```
+
+```csharp Every Day at 3 AM
+Cron.Daily(3)
+```
+
+```csharp Every Monday at 9 AM
+Cron.Weekly(DayOfWeek.Monday, 9)
+```
+
+```csharp Custom
+"0 */15 * * *"  // Every 15 minutes
+```
+</CodeGroup>
+
+## Outbox Pattern
+
+The outbox pattern ensures integration events are reliably published, even if the message broker is temporarily unavailable.
+
+### How It Works
+
+<Steps>
+  <Step title="Store Event in Outbox">
+    When a domain event occurs, save it to the `OutboxMessages` table within the same database transaction.
+  </Step>
+
+  <Step title="Commit Transaction">
+    Commit the database transaction. The event is now persisted.
+  </Step>
+
+  <Step title="Background Job Processes Outbox">
+    A recurring Hangfire job reads pending messages from the outbox and publishes them to the event bus.
+  </Step>
+
+  <Step title="Mark as Processed">
+    Once published, the message is marked as processed in the outbox.
+  </Step>
+</Steps>
+
+### Outbox Message Entity
+
+```csharp OutboxMessage.cs
+public class OutboxMessage
+{
+    public Guid Id { get; set; }
+    public DateTime CreatedOnUtc { get; set; }
+    public string Type { get; set; } = default!;
+    public string Payload { get; set; } = default!;
+    public string? TenantId { get; set; }
+    public string? CorrelationId { get; set; }
+    public DateTime? ProcessedOnUtc { get; set; }
+    public int RetryCount { get; set; }
+    public string? LastError { get; set; }
+    public bool IsDead { get; set; }
+}
+```
+
+### Adding Events to the Outbox
+
+Use `IOutboxStore` to persist events:
+
+```csharp
+public class GenerateTokenCommandHandler 
+    : ICommandHandler<GenerateTokenCommand, TokenResponse>
+{
+    private readonly IOutboxStore _outboxStore;
+
+    public async ValueTask<TokenResponse> Handle(
+        GenerateTokenCommand command,
+        CancellationToken ct)
+    {
+        // Business logic...
+        var token = await _tokenService.IssueAsync(...);
+
+        // Add integration event to outbox
+        var integrationEvent = new TokenGeneratedIntegrationEvent(
+            Id: Guid.NewGuid(),
+            OccurredOnUtc: DateTime.UtcNow,
+            TenantId: tenantId,
+            CorrelationId: correlationId,
+            Source: "Identity",
+            UserId: subject,
+            Email: command.Email,
+            ClientId: clientId!,
+            IpAddress: ip,
+            UserAgent: ua,
+            TokenFingerprint: fingerprint,
+            AccessTokenExpiresAtUtc: token.AccessTokenExpiresAt);
+
+        await _outboxStore.AddAsync(integrationEvent, ct)
+            .ConfigureAwait(false);
+
+        return token;
+    }
+}
+```
+
+### Outbox Dispatcher
+
+The `OutboxDispatcher` processes pending messages:
+
+```csharp OutboxDispatcher.cs
+public sealed class OutboxDispatcher
+{
+    private readonly IOutboxStore _outbox;
+    private readonly IEventBus _bus;
+    private readonly IEventSerializer _serializer;
+    private readonly ILogger<OutboxDispatcher> _logger;
+    private readonly EventingOptions _options;
+
+    public async Task DispatchAsync(CancellationToken ct = default)
+    {
+        var batchSize = _options.OutboxBatchSize;
+        if (batchSize <= 0) batchSize = 100;
+
+        var messages = await _outbox.GetPendingBatchAsync(batchSize, ct)
+            .ConfigureAwait(false);
+        
+        if (messages.Count == 0)
+        {
+            _logger.LogDebug("No outbox messages to dispatch.");
+            return;
+        }
+
+        _logger.LogInformation(
+            "Dispatching {Count} outbox messages (BatchSize={BatchSize})",
+            messages.Count, batchSize);
+
+        foreach (var message in messages)
+        {
+            try
+            {
+                var @event = _serializer.Deserialize(
+                    message.Payload, message.Type);
+                
+                await _bus.PublishAsync(@event, ct).ConfigureAwait(false);
+                await _outbox.MarkAsProcessedAsync(message, ct)
+                    .ConfigureAwait(false);
+                
+                _logger.LogDebug(
+                    "Outbox message {MessageId} dispatched and marked as processed.",
+                    message.Id);
+            }
+            catch (Exception ex)
+            {
+                var maxRetries = _options.OutboxMaxRetries <= 0 
+                    ? 5 : _options.OutboxMaxRetries;
+                var isDead = message.RetryCount + 1 >= maxRetries;
+
+                await _outbox.MarkAsFailedAsync(
+                    message, ex.Message, isDead, ct).ConfigureAwait(false);
+
+                if (isDead)
+                {
+                    _logger.LogError(ex, 
+                        "Outbox message {MessageId} moved to dead-letter after {RetryCount} retries",
+                        message.Id, message.RetryCount + 1);
+                }
+                else
+                {
+                    _logger.LogWarning(ex, 
+                        "Outbox message {MessageId} failed (RetryCount={RetryCount}).",
+                        message.Id, message.RetryCount + 1);
+                }
+            }
+        }
+    }
+}
+```
+
+### Scheduling the Outbox Dispatcher
+
+Register a recurring job to process the outbox:
+
+```csharp
+await _jobService.RecurringAsync<OutboxDispatcher>(
+    "outbox-dispatcher",
+    dispatcher => dispatcher.DispatchAsync(CancellationToken.None),
+    "*/30 * * * * *");  // Every 30 seconds
+```
+
+## Job Filters
+
+Hangfire filters add cross-cutting concerns to jobs:
+
+### Tenant Context Filter
+
+Ensures jobs run in the correct tenant context:
+
+```csharp FshJobFilter.cs
+public class FshJobFilter : IServerFilter
+{
+    private readonly IServiceProvider _serviceProvider;
+
+    public void OnPerforming(PerformingContext context)
+    {
+        var tenantId = context.GetJobParameter<string>("TenantId");
+        if (!string.IsNullOrEmpty(tenantId))
+        {
+            // Set tenant context for job execution
+            var tenantAccessor = _serviceProvider
+                .GetRequiredService<IMultiTenantContextAccessor<AppTenantInfo>>();
+            // Set tenant...
+        }
+    }
+}
+```
+
+### Logging Filter
+
+Logs job execution:
+
+```csharp LogJobFilter.cs
+public class LogJobFilter : IServerFilter
+{
+    public void OnPerforming(PerformingContext context)
+    {
+        Console.WriteLine($"Starting job: {context.BackgroundJob.Job.Method.Name}");
+    }
+
+    public void OnPerformed(PerformedContext context)
+    {
+        Console.WriteLine($"Completed job: {context.BackgroundJob.Job.Method.Name}");
+    }
+}
+```
+
+### Telemetry Filter
+
+Adds OpenTelemetry tracing to jobs:
+
+```csharp HangfireTelemetryFilter.cs
+public class HangfireTelemetryFilter : IServerFilter
+{
+    public void OnPerforming(PerformingContext context)
+    {
+        var activitySource = new ActivitySource("FSH.Hangfire");
+        var activity = activitySource.StartActivity(
+            $"Job: {context.BackgroundJob.Job.Method.Name}",
+            ActivityKind.Internal);
+        
+        activity?.SetTag("job.id", context.BackgroundJob.Id);
+        activity?.SetTag("job.type", context.BackgroundJob.Job.Type.Name);
+    }
+}
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use Queues for Priority">
+    Separate jobs into queues (e.g., `default`, `email`, `reports`) and configure workers accordingly.
+  </Accordion>
+
+  <Accordion title="Make Jobs Idempotent">
+    Jobs may be retried. Ensure they can safely run multiple times without side effects.
+  </Accordion>
+
+  <Accordion title="Set Retry Policies">
+    Configure automatic retries for transient failures, but limit retries to avoid infinite loops.
+  </Accordion>
+
+  <Accordion title="Monitor Job Failures">
+    Set up alerts for failed jobs and dead-letter messages.
+  </Accordion>
+
+  <Accordion title="Use the Outbox Pattern for Events">
+    Never publish events directly to a message broker. Always use the outbox for reliability.
+  </Accordion>
+</AccordionGroup>
+
+## Testing Background Jobs
+
+Test that jobs execute correctly:
+
+```csharp
+[Fact]
+public async Task EnqueueJob_ExecutesSuccessfully()
+{
+    // Arrange
+    var jobService = _serviceProvider.GetRequiredService<IJobService>();
+    var processor = _serviceProvider.GetRequiredService<OrderProcessor>();
+
+    // Act
+    var jobId = await jobService.EnqueueAsync<OrderProcessor>(
+        p => p.ProcessAsync(Guid.NewGuid(), CancellationToken.None));
+
+    // Wait for job to complete (test environment)
+    await Task.Delay(2000);
+
+    // Assert
+    var jobDetails = JobStorage.Current
+        .GetMonitoringApi()
+        .JobDetails(jobId);
+    
+    Assert.Equal("Succeeded", jobDetails.History[0].StateName);
+}
+```
+
+## Related Topics
+
+<CardGroup cols={2}>
+  <Card title="Observability" icon="chart-line" href="/features/observability">
+    Trace and monitor background job execution
+  </Card>
+
+  <Card title="Multi-Tenancy" icon="building" href="/features/multi-tenancy">
+    Run jobs in tenant context
+  </Card>
+
+  <Card title="Health Checks" icon="heart-pulse" href="/features/health-checks">
+    Monitor Hangfire server health
+  </Card>
+
+  <Card title="Integration Events" icon="arrow-right-arrow-left" href="/building-blocks/eventing">
+    Learn about the outbox pattern and event-driven architecture
+  </Card>
+</CardGroup>

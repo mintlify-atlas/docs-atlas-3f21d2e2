@@ -1,0 +1,273 @@
+---
+title: Installation
+description: Get started with the FullStackHero .NET Starter Kit in minutes
+icon: download
+---
+
+This guide will help you install and run the FullStackHero .NET Starter Kit using .NET Aspire for local development.
+
+## Prerequisites
+
+Before you begin, ensure you have the following installed:
+
+<CardGroup cols={2}>
+  <Card title=".NET 10 SDK" icon="code">
+    Download from [dotnet.microsoft.com](https://dotnet.microsoft.com/download/dotnet/10.0)
+  </Card>
+  <Card title="Docker Desktop" icon="docker">
+    Required for Postgres and Redis containers
+  </Card>
+  <Card title=".NET Aspire Workload" icon="layer-group">
+    Install via `dotnet workload install aspire`
+  </Card>
+  <Card title="IDE" icon="laptop-code">
+    Visual Studio 2025+, VS Code, or Rider
+  </Card>
+</CardGroup>
+
+<Note>
+  The starter kit targets **net10.0** and requires the latest C# language features. Make sure your SDK is up to date.
+</Note>
+
+## Installation Steps
+
+<Steps>
+  <Step title="Verify .NET 10 SDK">
+    Confirm you have .NET 10 installed:
+
+    ```bash
+    dotnet --version
+    ```
+
+    You should see output like `10.0.0` or higher.
+  </Step>
+
+  <Step title="Install Aspire Workload">
+    Install the .NET Aspire workload for orchestration:
+
+    ```bash
+    dotnet workload install aspire
+    ```
+
+    Verify the installation:
+
+    ```bash
+    dotnet workload list
+    ```
+  </Step>
+
+  <Step title="Clone the Repository">
+    Clone the starter kit from GitHub:
+
+    ```bash
+    git clone https://github.com/fullstackhero/dotnet-starter-kit.git
+    cd dotnet-starter-kit
+    ```
+  </Step>
+
+  <Step title="Restore Dependencies">
+    Restore NuGet packages for the entire solution:
+
+    ```bash
+    dotnet restore src/FSH.Framework.slnx
+    ```
+
+    This will restore all dependencies defined in `Directory.Packages.props` including:
+    - Entity Framework Core 10.0.2
+    - Finbuckle.MultiTenant 10.0.2
+    - Hangfire 1.8.23
+    - Mediator 3.0.1
+    - OpenTelemetry packages
+  </Step>
+
+  <Step title="Build the Solution">
+    Build the entire solution to ensure everything compiles:
+
+    ```bash
+    dotnet build src/FSH.Framework.slnx
+    ```
+
+    <Warning>
+      The project is configured with `TreatWarningsAsErrors=false` in development, but you should aim for zero warnings in production builds.
+    </Warning>
+  </Step>
+
+  <Step title="Start Docker Desktop">
+    Ensure Docker Desktop is running. Aspire will use it to spin up:
+    - PostgreSQL container (with persistent volume `fsh-postgres-data`)
+    - Redis container (with persistent volume `fsh-redis-data`)
+  </Step>
+
+  <Step title="Run with Aspire">
+    Launch the entire application stack using Aspire:
+
+    ```bash
+    dotnet run --project src/Playground/FSH.Playground.AppHost
+    ```
+
+    Aspire will:
+    1. Start PostgreSQL and Redis containers
+    2. Apply database migrations automatically
+    3. Launch the Playground API at `https://localhost:5285`
+    4. Launch the Blazor UI at `https://localhost:7140`
+    5. Enable OpenTelemetry export to `http://localhost:4317`
+
+    <Note>
+      First run may take a few minutes while Docker pulls images and applies migrations.
+    </Note>
+  </Step>
+
+  <Step title="Verify Installation">
+    Open your browser and verify the following endpoints:
+
+    <CodeGroup>
+      ```bash API Health Check
+      curl https://localhost:5285/health
+      ```
+
+      ```bash API Documentation
+      # Open in browser:
+      https://localhost:5285/scalar
+      ```
+
+      ```bash Blazor UI
+      # Open in browser:
+      https://localhost:7140
+      ```
+    </CodeGroup>
+
+    You should see:
+    - Health endpoint returning `Healthy` status
+    - Interactive API docs via Scalar
+    - Blazor UI login screen
+  </Step>
+</Steps>
+
+## Verification Commands
+
+After installation, verify your setup:
+
+```bash Check running containers
+docker ps
+```
+
+You should see containers for:
+- `postgres` (port 5432)
+- `redis` (port 6379)
+
+```bash Check API endpoint
+curl https://localhost:5285 -k
+```
+
+Expected response:
+```json
+{
+  "message": "hello world!"
+}
+```
+
+```bash Run tests
+dotnet test src/FSH.Framework.slnx
+```
+
+All architecture and unit tests should pass.
+
+## Running Without Aspire
+
+If you prefer to run the API standalone without Aspire:
+
+<Steps>
+  <Step title="Set up Infrastructure">
+    Manually start PostgreSQL and Redis:
+
+    ```bash
+    docker run -d --name fsh-postgres -p 5432:5432 \
+      -e POSTGRES_PASSWORD=password \
+      -e POSTGRES_DB=fsh \
+      postgres:17
+
+    docker run -d --name fsh-redis -p 6379:6379 redis:7
+    ```
+  </Step>
+
+  <Step title="Configure Connection Strings">
+    Update `src/Playground/Playground.Api/appsettings.json` or set environment variables:
+
+    ```bash
+    export DatabaseOptions__Provider=POSTGRESQL
+    export DatabaseOptions__ConnectionString="Server=localhost;Database=fsh;User Id=postgres;Password=password"
+    export DatabaseOptions__MigrationsAssembly="FSH.Playground.Migrations.PostgreSQL"
+    export CachingOptions__Redis="localhost:6379"
+    ```
+  </Step>
+
+  <Step title="Run the API">
+    ```bash
+    dotnet run --project src/Playground/Playground.Api
+    ```
+
+    The API will start at `https://localhost:5285`.
+  </Step>
+</Steps>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Aspire Setup" icon="diagram-project" href="/getting-started/aspire-setup">
+    Learn how Aspire orchestrates your application
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/getting-started/configuration">
+    Understand all configuration options
+  </Card>
+  <Card title="Project Structure" icon="folder-tree" href="/getting-started/project-structure">
+    Explore the codebase organization
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/architecture/overview">
+    Deep dive into the architecture
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Docker containers won't start">
+    Ensure Docker Desktop is running and you have sufficient resources allocated:
+    - Memory: At least 4GB
+    - CPU: At least 2 cores
+
+    Check Docker logs:
+    ```bash
+    docker logs fsh-postgres
+    docker logs fsh-redis
+    ```
+  </Accordion>
+
+  <Accordion title="Migration errors on startup">
+    The API automatically applies migrations on startup via `UseHeroMultiTenantDatabases()`. If migrations fail:
+
+    1. Check database connectivity
+    2. Verify the connection string in `appsettings.json`
+    3. Ensure the `MigrationsAssembly` matches your database provider
+
+    Manual migration:
+    ```bash
+    dotnet ef database update --project src/Playground/Migrations.PostgreSQL
+    ```
+  </Accordion>
+
+  <Accordion title="Port conflicts">
+    If default ports are in use, modify `launchSettings.json` or Aspire configuration:
+    - API: 5285 (HTTPS)
+    - Blazor: 7140 (HTTPS)
+    - PostgreSQL: 5432
+    - Redis: 6379
+  </Accordion>
+
+  <Accordion title="SSL certificate errors">
+    Trust the development certificate:
+
+    ```bash
+    dotnet dev-certs https --trust
+    ```
+  </Accordion>
+</AccordionGroup>

@@ -1,0 +1,488 @@
+---
+title: Jobs Building Block
+description: Background job processing with Hangfire
+icon: clock
+---
+
+## Overview
+
+The **Jobs** building block provides background job processing using Hangfire. It supports fire-and-forget jobs, delayed jobs, recurring jobs, and job continuations.
+
+<Note>
+  Jobs run in the background — perfect for long-running tasks like sending emails, processing files, or generating reports.
+</Note>
+
+## Key Components
+
+### IJobService
+
+Main abstraction for job scheduling:
+
+```csharp IJobService.cs
+using System.Linq.Expressions;
+
+namespace FSH.Framework.Jobs.Services;
+
+public interface IJobService
+{
+    // Fire-and-forget
+    string Enqueue(Expression<Action> methodCall);
+    string Enqueue(Expression<Func<Task>> methodCall);
+    string Enqueue<T>(Expression<Action<T>> methodCall);
+    string Enqueue<T>(Expression<Func<T, Task>> methodCall);
+    string Enqueue(string queue, Expression<Func<Task>> methodCall);
+
+    // Delayed jobs
+    string Schedule(Expression<Action> methodCall, TimeSpan delay);
+    string Schedule(Expression<Func<Task>> methodCall, TimeSpan delay);
+    string Schedule(Expression<Action> methodCall, DateTimeOffset enqueueAt);
+    string Schedule(Expression<Func<Task>> methodCall, DateTimeOffset enqueueAt);
+    string Schedule<T>(Expression<Action<T>> methodCall, TimeSpan delay);
+    string Schedule<T>(Expression<Func<T, Task>> methodCall, TimeSpan delay);
+
+    // Job management
+    bool Delete(string jobId);
+    bool Delete(string jobId, string fromState);
+    bool Requeue(string jobId);
+    bool Requeue(string jobId, string fromState);
+}
+```
+
+### HangfireOptions
+
+Configuration for Hangfire dashboard:
+
+```csharp HangfireOptions.cs
+namespace FSH.Framework.Jobs;
+
+public sealed class HangfireOptions
+{
+    public string Route { get; set; } = "/jobs";
+    public string? UserName { get; set; }
+    public string? Password { get; set; }
+}
+```
+
+## Registration
+
+<CodeGroup>
+```csharp Program.cs (Services)
+using FSH.Framework.Jobs;
+
+builder.Services.AddHeroJobs();
+
+// Or via platform registration
+builder.AddHeroPlatform(options =>
+{
+    options.EnableJobs = true; // Enables Hangfire
+});
+```
+
+```csharp Program.cs (Middleware)
+app.UseHeroJobDashboard(app.Configuration);
+```
+
+```json appsettings.json (Configuration)
+{
+  "HangfireOptions": {
+    "Route": "/jobs",
+    "UserName": "admin",
+    "Password": "SecurePassword123!"
+  },
+  "DatabaseOptions": {
+    "Provider": "postgresql",
+    "ConnectionString": "Host=localhost;Database=fsh;Username=postgres;Password=postgres"
+  }
+}
+```
+</CodeGroup>
+
+<Note>
+  Hangfire uses the same database as your application. Supported providers: PostgreSQL, SQL Server.
+</Note>
+
+## Usage Examples
+
+### Fire-and-Forget Jobs
+
+Run immediately in the background:
+
+```csharp SendEmailHandler.cs
+using FSH.Framework.Jobs.Services;
+
+public sealed class CreateOrderHandler : ICommandHandler<CreateOrderCommand, Guid>
+{
+    private readonly IJobService _jobService;
+    private readonly OrderDbContext _db;
+
+    public async ValueTask<Guid> Handle(CreateOrderCommand cmd, CancellationToken ct)
+    {
+        // Create order
+        var order = Order.Create(cmd.CustomerId, cmd.Items);
+        await _db.Orders.AddAsync(order, ct);
+        await _db.SaveChangesAsync(ct);
+
+        // Send confirmation email in background
+        _jobService.Enqueue<EmailService>(x => 
+            x.SendOrderConfirmationAsync(order.Id, order.CustomerEmail, ct));
+
+        return order.Id;
+    }
+}
+```
+
+### Delayed Jobs
+
+Schedule jobs to run after a delay:
+
+```csharp ScheduleReminderHandler.cs
+using FSH.Framework.Jobs.Services;
+
+public sealed class ScheduleReminderHandler : ICommandHandler<ScheduleReminderCommand>
+{
+    private readonly IJobService _jobService;
+
+    public async ValueTask<Unit> Handle(ScheduleReminderCommand cmd, CancellationToken ct)
+    {
+        // Send reminder in 24 hours
+        _jobService.Schedule<NotificationService>(
+            x => x.SendReminderAsync(cmd.UserId, cmd.Message, ct),
+            TimeSpan.FromHours(24)
+        );
+
+        // Or schedule for specific date/time
+        _jobService.Schedule<NotificationService>(
+            x => x.SendReminderAsync(cmd.UserId, cmd.Message, ct),
+            cmd.ScheduledAt
+        );
+
+        return Unit.Value;
+    }
+}
+```
+
+### Recurring Jobs
+
+Jobs that run on a schedule (cron expressions):
+
+```csharp JobsModule.cs
+using Hangfire;
+using Microsoft.AspNetCore.Builder;
+
+public static class JobsModule
+{
+    public static void MapRecurringJobs(this WebApplication app)
+    {
+        var recurringJobManager = app.Services.GetRequiredService<IRecurringJobManager>();
+
+        // Daily cleanup at 2 AM
+        recurringJobManager.AddOrUpdate<CleanupService>(
+            "daily-cleanup",
+            x => x.CleanupOldRecordsAsync(CancellationToken.None),
+            Cron.Daily(2)
+        );
+
+        // Hourly cache refresh
+        recurringJobManager.AddOrUpdate<CacheService>(
+            "hourly-cache-refresh",
+            x => x.RefreshCacheAsync(CancellationToken.None),
+            Cron.Hourly()
+        );
+
+        // Weekly reports every Monday at 9 AM
+        recurringJobManager.AddOrUpdate<ReportService>(
+            "weekly-reports",
+            x => x.GenerateWeeklyReportsAsync(CancellationToken.None),
+            Cron.Weekly(DayOfWeek.Monday, 9)
+        );
+    }
+}
+```
+
+### Job Continuations
+
+Chain jobs together:
+
+```csharp ProcessOrderHandler.cs
+using FSH.Framework.Jobs.Services;
+using Hangfire;
+
+public sealed class ProcessOrderHandler : ICommandHandler<ProcessOrderCommand>
+{
+    private readonly IJobService _jobService;
+
+    public async ValueTask<Unit> Handle(ProcessOrderCommand cmd, CancellationToken ct)
+    {
+        // Step 1: Process payment
+        var paymentJobId = _jobService.Enqueue<PaymentService>(
+            x => x.ProcessPaymentAsync(cmd.OrderId, ct));
+
+        // Step 2: After payment succeeds, ship order
+        BackgroundJob.ContinueJobWith<ShippingService>(
+            paymentJobId,
+            x => x.ShipOrderAsync(cmd.OrderId, ct));
+
+        return Unit.Value;
+    }
+}
+```
+
+### Queue-Specific Jobs
+
+Organize jobs into queues for priority processing:
+
+```csharp JobQueueExtensions.cs
+using FSH.Framework.Jobs.Services;
+
+public static class JobQueues
+{
+    public const string Email = "email";
+    public const string Default = "default";
+    public const string Critical = "critical";
+}
+
+public sealed class NotificationHandler : ICommandHandler<SendNotificationCommand>
+{
+    private readonly IJobService _jobService;
+
+    public async ValueTask<Unit> Handle(SendNotificationCommand cmd, CancellationToken ct)
+    {
+        // High-priority jobs in dedicated queue
+        _jobService.Enqueue(
+            JobQueues.Email,
+            () => _emailService.SendAsync(cmd.Email, ct));
+
+        return Unit.Value;
+    }
+}
+```
+
+### Job Context and Telemetry
+
+Jobs automatically include tenant context and telemetry:
+
+```csharp TenantAwareJob.cs
+using FSH.Framework.Core.Context;
+
+public sealed class TenantAwareJob
+{
+    private readonly ICurrentUser _currentUser;
+    private readonly OrderDbContext _db;
+
+    public async Task ProcessTenantOrdersAsync(CancellationToken ct)
+    {
+        // Tenant context is automatically preserved
+        var tenantId = _currentUser.GetTenantId();
+
+        var orders = await _db.Orders
+            .Where(o => o.TenantId == tenantId)
+            .ToListAsync(ct);
+
+        // Process orders for this tenant
+    }
+}
+```
+
+## Dashboard
+
+Access the Hangfire dashboard at `/jobs` (or your configured route):
+
+```
+http://localhost:5000/jobs
+```
+
+**Features:**
+- View running, scheduled, and failed jobs
+- Retry failed jobs
+- Delete jobs
+- Monitor server performance
+- View job history and logs
+
+**Authentication:**
+Dashboard requires basic authentication (configured in `appsettings.json`).
+
+## Job Queues Configuration
+
+Hangfire processes multiple queues:
+
+```csharp Extensions.cs
+services.AddHangfireServer(options =>
+{
+    options.HeartbeatInterval = TimeSpan.FromSeconds(30);
+    options.Queues = ["default", "email"];  // Priority order
+    options.WorkerCount = 5;                 // Concurrent workers
+    options.SchedulePollingInterval = TimeSpan.FromSeconds(30);
+});
+```
+
+## Common Job Patterns
+
+### 1. Send Email After Signup
+
+```csharp
+public async ValueTask<Unit> Handle(RegisterUserCommand cmd, CancellationToken ct)
+{
+    var user = await CreateUserAsync(cmd, ct);
+
+    // Send welcome email in background
+    _jobService.Enqueue<EmailService>(x => 
+        x.SendWelcomeEmailAsync(user.Email, user.Name, ct));
+
+    return Unit.Value;
+}
+```
+
+### 2. Generate Report Daily
+
+```csharp
+recurringJobManager.AddOrUpdate<ReportService>(
+    "daily-sales-report",
+    x => x.GenerateSalesReportAsync(CancellationToken.None),
+    Cron.Daily(8)  // 8 AM every day
+);
+```
+
+### 3. Delete Old Records Weekly
+
+```csharp
+recurringJobManager.AddOrUpdate<CleanupService>(
+    "weekly-cleanup",
+    x => x.DeleteOldLogsAsync(CancellationToken.None),
+    Cron.Weekly(DayOfWeek.Sunday, 2)  // Sundays at 2 AM
+);
+```
+
+### 4. Retry Failed Jobs
+
+```csharp
+[AutomaticRetry(Attempts = 3, DelaysInSeconds = new[] { 60, 300, 600 })]
+public async Task ProcessPaymentAsync(Guid orderId, CancellationToken ct)
+{
+    // Automatically retries on failure:
+    // - 1st retry after 1 minute
+    // - 2nd retry after 5 minutes
+    // - 3rd retry after 10 minutes
+}
+```
+
+## Best Practices
+
+<Steps>
+  <Step title="Keep Jobs Idempotent">
+    Jobs may run multiple times due to retries. Ensure they can be safely re-executed.
+  </Step>
+  <Step title="Pass Primitive Types">
+    Only pass simple types (IDs, strings) to jobs. Resolve entities inside the job.
+  </Step>
+  <Step title="Use Scoped Services">
+    Jobs have their own DI scope. Inject services via constructor or method parameters.
+  </Step>
+  <Step title="Handle Exceptions">
+    Use `try-catch` and log errors. Failed jobs appear in the dashboard.
+  </Step>
+  <Step title="Monitor Dashboard">
+    Regularly check the dashboard for failed jobs and performance issues.
+  </Step>
+</Steps>
+
+## Cron Schedule Examples
+
+```csharp
+// Every minute
+Cron.Minutely()
+
+// Every hour
+Cron.Hourly()
+
+// Every hour at 30 minutes past
+Cron.Hourly(30)
+
+// Every day at 2 AM
+Cron.Daily(2)
+
+// Every day at 2:30 AM
+Cron.Daily(2, 30)
+
+// Every Monday at 9 AM
+Cron.Weekly(DayOfWeek.Monday, 9)
+
+// Every month on the 1st at midnight
+Cron.Monthly(1)
+
+// Every year on January 1st at midnight
+Cron.Yearly()
+
+// Custom cron expression
+"0 */15 * * *"  // Every 15 minutes
+```
+
+## Telemetry and Filters
+
+Jobs automatically include:
+
+- **Tenant context**: Jobs inherit the tenant ID from the enqueuing request
+- **Correlation ID**: For distributed tracing
+- **OpenTelemetry spans**: Automatic instrumentation
+- **Logging**: Structured logs with job context
+
+```csharp HangfireTelemetryFilter.cs
+public sealed class HangfireTelemetryFilter : IServerFilter
+{
+    public void OnPerforming(PerformingContext context)
+    {
+        // Start OpenTelemetry span
+    }
+
+    public void OnPerformed(PerformedContext context)
+    {
+        // End OpenTelemetry span
+    }
+}
+```
+
+## Troubleshooting
+
+### Jobs Not Running
+
+- Check if Hangfire server is registered: `services.AddHangfireServer()`
+- Verify database connection in `DatabaseOptions`
+- Check worker count and queue configuration
+
+### Dashboard Not Loading
+
+- Verify route configuration: `HangfireOptions:Route`
+- Check username/password in `appsettings.json`
+- Ensure `UseHeroJobDashboard()` is called in middleware pipeline
+
+### Stale Locks (PostgreSQL)
+
+The starter kit automatically cleans up stale locks on startup:
+
+```csharp
+DELETE FROM hangfire.lock WHERE acquired < NOW() - INTERVAL '5 minutes'
+```
+
+## Package Reference
+
+```xml YourModule.csproj
+<ItemGroup>
+  <ProjectReference Include="..\..\BuildingBlocks\Jobs\FSH.Framework.Jobs.csproj" />
+</ItemGroup>
+```
+
+## Related Resources
+
+<CardGroup cols={2}>
+  <Card title="Mailing Building Block" icon="envelope" href="/building-blocks/mailing">
+    Send emails via background jobs
+  </Card>
+  <Card title="Eventing Building Block" icon="signal" href="/building-blocks/eventing">
+    Dispatch integration events via jobs
+  </Card>
+  <Card title="Hangfire Documentation" icon="book" href="https://docs.hangfire.io/">
+    Official Hangfire documentation
+  </Card>
+  <Card title="Cron Expression Generator" icon="calendar" href="https://crontab.guru/">
+    Generate cron expressions easily
+  </Card>
+</CardGroup>

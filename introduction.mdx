@@ -1,0 +1,199 @@
+---
+title: "Introduction"
+description: "Production-grade modular monolith framework for building multi-tenant SaaS and enterprise APIs on .NET 10"
+---
+
+<div style={{
+  background: 'linear-gradient(135deg, #e0f2e4 0%, #f9fafb 100%)',
+  padding: '3rem 2rem',
+  borderRadius: '8px',
+  marginBottom: '2rem',
+  border: '1px solid #e0e0e0'
+}}>
+  <h1 style={{
+    fontSize: '48px',
+    fontWeight: '700',
+    color: '#1a202c',
+    marginBottom: '1rem',
+    fontFamily: 'Inter, sans-serif'
+  }}>
+    FullStackHero .NET Starter Kit
+  </h1>
+  <p style={{
+    fontSize: '18px',
+    color: '#1a202c',
+    marginBottom: '2rem',
+    fontFamily: 'Inter, sans-serif'
+  }}>
+    An opinionated, production-first starter for building multi-tenant SaaS and enterprise APIs on .NET 10. Get ready-to-ship Identity, Multitenancy, Auditing, caching, mailing, jobs, storage, health checks, OpenAPI, and OpenTelemetry—wired through Minimal APIs, Mediator, and EF Core.
+  </p>
+  <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+    <a 
+      href="/quickstart" 
+      style={{
+        background: '#4caf50',
+        color: '#ffffff',
+        padding: '12px 24px',
+        borderRadius: '4px',
+        textDecoration: 'none',
+        fontWeight: '600',
+        fontFamily: 'Inter, sans-serif',
+        display: 'inline-block'
+      }}
+    >
+      Get Started
+    </a>
+    <a 
+      href="https://github.com/fullstackhero/dotnet-starter-kit" 
+      style={{
+        background: 'transparent',
+        color: '#000000',
+        padding: '12px 24px',
+        borderRadius: '4px',
+        textDecoration: 'none',
+        fontWeight: '600',
+        fontFamily: 'Inter, sans-serif',
+        display: 'inline-block',
+        border: '2px solid #000000'
+      }}
+    >
+      View on GitHub
+    </a>
+  </div>
+</div>
+
+## Why Choose FullStackHero?
+
+<CardGroup cols={2}>
+  <Card title="Modular Architecture" icon="cubes" href="/architecture/modular-monolith">
+    Drop-in modules with vertical slices. Add Identity, Multitenancy, and Auditing to any API—let the module loader wire endpoints automatically.
+  </Card>
+  <Card title="Battle-Tested Building Blocks" icon="toolbox" href="/building-blocks/overview">
+    Pre-built infrastructure for persistence, caching, mailing, background jobs, storage, and web hosting with auth, rate limiting, and versioning.
+  </Card>
+  <Card title="Cloud-Ready from Day One" icon="cloud" href="/getting-started/aspire-setup">
+    Aspire AppHost spins up Postgres, Redis, and your API with OpenTelemetry tracing enabled. Deploy with confidence using included Terraform templates.
+  </Card>
+  <Card title="Multi-Tenant by Default" icon="building" href="/features/multi-tenancy">
+    Finbuckle-powered tenancy across Identity and your module DbContexts. Migrate and seed tenant databases automatically on startup.
+  </Card>
+</CardGroup>
+
+## Key Features
+
+<AccordionGroup>
+  <Accordion title="Modular Monolith with Vertical Slices">
+    Clean separation of concerns with independent modules that can evolve separately. Each feature is a complete vertical slice with its own commands, queries, handlers, and endpoints.
+  </Accordion>
+  
+  <Accordion title="CQRS with Mediator Pattern">
+    Command and Query Responsibility Segregation using the Mediator library. FluentValidation ensures all commands and queries are validated before execution.
+  </Accordion>
+  
+  <Accordion title="Multi-Tenancy Support">
+    Database-per-tenant isolation using Finbuckle.MultiTenant. Automatic tenant resolution, migration management, and tenant-aware DbContext registration.
+  </Accordion>
+  
+  <Accordion title="Complete Identity & Authorization">
+    ASP.NET Identity integration with JWT token generation and refresh. Role-based and permission-based authorization with group management and session tracking.
+  </Accordion>
+  
+  <Accordion title="Built-in Modules">
+    Three production-ready modules: Identity (users, roles, permissions), Multitenancy (tenant management, migrations), and Auditing (security, activity, exception logs).
+  </Accordion>
+  
+  <Accordion title="EF Core 10 with Specifications">
+    Entity Framework Core 10 with the Specification pattern for complex queries. Domain events, outbox pattern, and tenant-aware database contexts.
+  </Accordion>
+  
+  <Accordion title="Distributed Caching & Background Jobs">
+    Redis-backed distributed caching and Hangfire for background job processing. Storage abstractions for local and cloud file storage.
+  </Accordion>
+  
+  <Accordion title="Observability Built-In">
+    OpenTelemetry for traces, metrics, and logs. Structured logging with Serilog, health checks, and comprehensive audit logging.
+  </Accordion>
+</AccordionGroup>
+
+## Stack Highlights
+
+- **.NET 10** with C# latest features, Minimal APIs, and top-level statements
+- **Mediator** for CQRS command/query handling with FluentValidation
+- **EF Core 10** with domain events, specifications, and multi-tenant support
+- **ASP.NET Identity** with JWT issuance/refresh, roles, permissions, and rate-limited auth endpoints
+- **Hangfire** for background jobs and **Redis** for distributed caching
+- **API versioning**, rate limiting, CORS, security headers, OpenAPI (Swagger), and Scalar documentation UI
+- **.NET Aspire** for local development orchestration
+- **Terraform** templates for AWS infrastructure
+
+## Quick Start
+
+Get up and running with FullStackHero in minutes:
+
+<Steps>
+  <Step title="Install Prerequisites">
+    Install .NET 10 SDK, .NET Aspire workload, and Docker Desktop.
+  </Step>
+  
+  <Step title="Clone and Restore">
+    Clone the repository and restore dependencies:
+    ```bash
+    git clone https://github.com/fullstackhero/dotnet-starter-kit.git
+    cd dotnet-starter-kit
+    dotnet restore src/FSH.Framework.slnx
+    ```
+  </Step>
+  
+  <Step title="Run with Aspire">
+    Launch the Aspire AppHost to start Postgres, Redis, and the Playground API:
+    ```bash
+    dotnet run --project src/Playground/FSH.Playground.AppHost
+    ```
+    Access the API at https://localhost:5285 with Swagger/Scalar UI.
+  </Step>
+</Steps>
+
+<Card title="Detailed Setup Guide" icon="book-open" href="/quickstart">
+  Follow our complete quickstart guide for step-by-step instructions and configuration options.
+</Card>
+
+## Repository Structure
+
+```
+src/
+├── BuildingBlocks/     # Framework packages (Core, Persistence, Caching, etc.)
+├── Modules/            # Business modules (Identity, Multitenancy, Auditing)
+├── Playground/         # Reference host application
+├── Tests/              # Architecture and unit tests
+├── Tools/              # Development tools
+terraform/              # Infrastructure as code
+```
+
+## What's Included
+
+The framework provides everything you need to build production-ready APIs:
+
+- **11 Building Block packages**: Core, Persistence, Caching, Mailing, Jobs, Storage, Eventing, Web, and more
+- **3 Core Modules**: Identity, Multitenancy, Auditing with contracts and persistence
+- **Playground API**: Reference implementation showing best practices
+- **Architecture tests**: Enforced layering and module boundaries
+- **Terraform templates**: AWS infrastructure scaffolding
+- **Aspire integration**: Local development orchestration with observability
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Set up your first project
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/architecture/overview">
+    Understand the design
+  </Card>
+  <Card title="Creating Features" icon="code" href="/development/creating-features">
+    Build your first feature
+  </Card>
+</CardGroup>
+
+<Note>
+  Built and maintained by Mukesh Murugan for teams that want to ship faster without sacrificing architecture discipline.
+</Note>

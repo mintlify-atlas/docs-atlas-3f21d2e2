@@ -1,0 +1,681 @@
+---
+title: Web Building Block
+description: ASP.NET Core extensions for OpenAPI, CORS, authentication, rate limiting, and more
+icon: globe
+---
+
+## Overview
+
+The **Web** building block provides ASP.NET Core infrastructure including OpenAPI documentation, CORS, authentication, rate limiting, observability, and modular architecture support.
+
+<Note>
+  The Web building block is the **orchestrator** — it wires together all other building blocks into a cohesive platform.
+</Note>
+
+## Key Components
+
+### Platform Registration
+
+Single method to register all platform services:
+
+```csharp AddHeroPlatform
+namespace FSH.Framework.Web;
+
+public static IHostApplicationBuilder AddHeroPlatform(
+    this IHostApplicationBuilder builder,
+    Action<FshPlatformOptions>? configure = null)
+{
+    var options = new FshPlatformOptions();
+    configure?.Invoke(options);
+
+    // Core services (always registered)
+    builder.AddHeroLogging();
+    builder.Services.AddHttpContextAccessor();
+    builder.Services.AddHeroDatabaseOptions(builder.Configuration);
+
+    // Optional services (opt-in)
+    if (options.EnableOpenTelemetry) builder.AddHeroOpenTelemetry();
+    if (options.EnableCors) builder.Services.AddHeroCors(builder.Configuration);
+    if (options.EnableOpenApi) builder.Services.AddHeroOpenApi(builder.Configuration);
+    if (options.EnableJobs) builder.Services.AddHeroJobs();
+    if (options.EnableMailing) builder.Services.AddHeroMailing();
+    if (options.EnableCaching) builder.Services.AddHeroCaching(builder.Configuration);
+
+    return builder;
+}
+```
+
+### FshPlatformOptions
+
+Configuration for platform features:
+
+```csharp FshPlatformOptions.cs
+public sealed class FshPlatformOptions
+{
+    public bool EnableCors { get; set; } = true;
+    public bool EnableOpenApi { get; set; } = true;
+    public bool EnableCaching { get; set; } = false;
+    public bool EnableJobs { get; set; } = false;
+    public bool EnableMailing { get; set; } = false;
+    public bool EnableOpenTelemetry { get; set; } = true;
+}
+```
+
+### Middleware Pipeline
+
+Configures the ASP.NET Core pipeline:
+
+```csharp UseHeroPlatform
+public static WebApplication UseHeroPlatform(
+    this WebApplication app,
+    Action<FshPipelineOptions>? configure = null)
+{
+    var options = new FshPipelineOptions();
+    configure?.Invoke(options);
+
+    // Exception handling
+    app.UseExceptionHandler();
+    app.UseHttpsRedirection();
+    app.UseHeroSecurityHeaders();
+
+    // Static files (if enabled)
+    if (options.ServeStaticFiles) app.UseStaticFiles();
+
+    // Hangfire dashboard
+    app.UseHeroJobDashboard(app.Configuration);
+    app.UseRouting();
+
+    // CORS (between routing and auth)
+    if (options.UseCors) app.UseHeroCors();
+
+    // OpenAPI
+    if (options.UseOpenApi) app.UseHeroOpenApi();
+
+    // Authentication & Authorization
+    app.UseAuthentication();
+    app.UseHeroRateLimiting();
+    app.UseAuthorization();
+
+    // Module endpoints
+    if (options.MapModules) app.MapModules();
+
+    // Health checks
+    app.MapHeroHealthEndpoints();
+
+    return app;
+}
+```
+
+## Registration Example
+
+<CodeGroup>
+```csharp Program.cs (Minimal)
+using FSH.Framework.Web;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Register platform services
+builder.AddHeroPlatform();
+
+var app = builder.Build();
+
+// Configure pipeline
+app.UseHeroPlatform();
+app.Run();
+```
+
+```csharp Program.cs (Custom)
+using FSH.Framework.Web;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Register platform services with custom options
+builder.AddHeroPlatform(options =>
+{
+    options.EnableCaching = true;
+    options.EnableJobs = true;
+    options.EnableMailing = true;
+    options.EnableOpenTelemetry = true;
+});
+
+var app = builder.Build();
+
+// Configure pipeline with custom options
+app.UseHeroPlatform(options =>
+{
+    options.ServeStaticFiles = true;
+    options.MapModules = true;
+});
+
+app.Run();
+```
+</CodeGroup>
+
+## Features
+
+### 1. OpenAPI / Swagger
+
+Automatic API documentation using Scalar:
+
+<CodeGroup>
+```csharp OpenApiExtensions.cs
+namespace FSH.Framework.Web.OpenApi;
+
+public static IServiceCollection AddHeroOpenApi(
+    this IServiceCollection services,
+    IConfiguration configuration)
+{
+    services.AddOptions<OpenApiOptions>()
+        .Bind(configuration.GetSection(nameof(OpenApiOptions)))
+        .ValidateOnStart();
+
+    services.AddOpenApi(options =>
+    {
+        options.AddDocumentTransformer<BearerSecuritySchemeTransformer>();
+        // Configure title, version, description, etc.
+    });
+
+    return services;
+}
+
+public static void UseHeroOpenApi(this WebApplication app)
+{
+    app.MapOpenApi("/openapi/{documentName}.json");
+    app.MapScalarApiReference(options =>
+    {
+        options.WithTitle("FSH API")
+            .WithTheme(ScalarTheme.Alternate)
+            .EnableDarkMode()
+            .AddPreferredSecuritySchemes("Bearer");
+    });
+}
+```
+
+```json appsettings.json
+{
+  "OpenApiOptions": {
+    "Enabled": true,
+    "Title": "FSH API",
+    "Version": "v1",
+    "Description": "FullStackHero API Documentation",
+    "Contact": {
+      "Name": "Your Team",
+      "Email": "support@example.com",
+      "Url": "https://example.com"
+    }
+  }
+}
+```
+</CodeGroup>
+
+Access documentation at: `https://localhost:5001/scalar/v1`
+
+### 2. CORS Configuration
+
+<CodeGroup>
+```csharp CorsExtensions.cs
+namespace FSH.Framework.Web.Cors;
+
+public static IServiceCollection AddHeroCors(
+    this IServiceCollection services,
+    IConfiguration configuration)
+{
+    services.AddOptions<CorsOptions>()
+        .Bind(configuration.GetSection(nameof(CorsOptions)));
+
+    var options = configuration.GetSection(nameof(CorsOptions)).Get<CorsOptions>() ?? new();
+
+    services.AddCors(corsOptions =>
+    {
+        corsOptions.AddPolicy("HeroCorsPolicy", builder =>
+        {
+            if (options.AllowAll)
+            {
+                builder.AllowAnyOrigin()
+                    .AllowAnyMethod()
+                    .AllowAnyHeader();
+            }
+            else
+            {
+                builder.WithOrigins(options.AllowedOrigins ?? [])
+                    .AllowAnyMethod()
+                    .AllowAnyHeader()
+                    .AllowCredentials();
+            }
+        });
+    });
+
+    return services;
+}
+
+public static IApplicationBuilder UseHeroCors(this IApplicationBuilder app)
+{
+    return app.UseCors("HeroCorsPolicy");
+}
+```
+
+```json appsettings.json
+{
+  "CorsOptions": {
+    "AllowAll": false,
+    "AllowedOrigins": [
+      "http://localhost:3000",
+      "https://app.example.com"
+    ]
+  }
+}
+```
+</CodeGroup>
+
+### 3. Rate Limiting
+
+Protect APIs from abuse:
+
+<CodeGroup>
+```csharp RateLimitingExtensions.cs
+namespace FSH.Framework.Web.RateLimiting;
+
+public static IServiceCollection AddHeroRateLimiting(
+    this IServiceCollection services,
+    IConfiguration configuration)
+{
+    services.AddOptions<RateLimitingOptions>()
+        .BindConfiguration(nameof(RateLimitingOptions));
+
+    var settings = configuration.GetSection(nameof(RateLimitingOptions))
+        .Get<RateLimitingOptions>() ?? new();
+
+    services.AddRateLimiter(options =>
+    {
+        options.RejectionStatusCode = 429;
+
+        if (!settings.Enabled) return;
+
+        // Global limiter (by tenant/user/IP)
+        options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(
+            context =>
+            {
+                var key = GetPartitionKey(context);
+                return RateLimitPartition.GetFixedWindowLimiter(
+                    key,
+                    _ => new FixedWindowRateLimiterOptions
+                    {
+                        PermitLimit = settings.Global.PermitLimit,
+                        Window = TimeSpan.FromSeconds(settings.Global.WindowSeconds)
+                    });
+            });
+
+        // Auth endpoint limiter (stricter)
+        options.AddPolicy<string>("auth", context =>
+            RateLimitPartition.GetFixedWindowLimiter(
+                GetPartitionKey(context),
+                _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = settings.Auth.PermitLimit,
+                    Window = TimeSpan.FromSeconds(settings.Auth.WindowSeconds)
+                }));
+    });
+
+    return services;
+}
+
+private static string GetPartitionKey(HttpContext context)
+{
+    // Partition by tenant, then user, then IP
+    var tenant = context.User?.FindFirst(ClaimConstants.Tenant)?.Value;
+    if (!string.IsNullOrWhiteSpace(tenant)) return $"tenant:{tenant}";
+
+    var userId = context.User?.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+    if (!string.IsNullOrWhiteSpace(userId)) return $"user:{userId}";
+
+    var ip = context.Connection.RemoteIpAddress?.ToString();
+    return string.IsNullOrWhiteSpace(ip) ? "ip:unknown" : $"ip:{ip}";
+}
+```
+
+```json appsettings.json
+{
+  "RateLimitingOptions": {
+    "Enabled": true,
+    "Global": {
+      "PermitLimit": 100,
+      "WindowSeconds": 60,
+      "QueueLimit": 0
+    },
+    "Auth": {
+      "PermitLimit": 5,
+      "WindowSeconds": 60,
+      "QueueLimit": 0
+    }
+  }
+}
+```
+</CodeGroup>
+
+Apply to specific endpoints:
+
+```csharp
+endpoints.MapPost("/auth/login", LoginHandler)
+    .RequireRateLimiting("auth");
+```
+
+### 4. Security Headers
+
+<CodeGroup>
+```csharp SecurityExtensions.cs
+namespace FSH.Framework.Web.Security;
+
+public static IApplicationBuilder UseHeroSecurityHeaders(
+    this IApplicationBuilder app)
+{
+    return app.UseMiddleware<SecurityHeadersMiddleware>();
+}
+
+public sealed class SecurityHeadersMiddleware
+{
+    public async Task InvokeAsync(HttpContext context, RequestDelegate next)
+    {
+        context.Response.Headers.Append("X-Content-Type-Options", "nosniff");
+        context.Response.Headers.Append("X-Frame-Options", "DENY");
+        context.Response.Headers.Append("X-XSS-Protection", "1; mode=block");
+        context.Response.Headers.Append("Referrer-Policy", "no-referrer");
+        context.Response.Headers.Append(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';");
+
+        await next(context);
+    }
+}
+```
+
+```json appsettings.json
+{
+  "SecurityHeadersOptions": {
+    "EnableHSTS": true,
+    "EnableCSP": true,
+    "EnableXSSProtection": true
+  }
+}
+```
+</CodeGroup>
+
+### 5. Global Exception Handler
+
+```csharp GlobalExceptionHandler.cs
+using FSH.Framework.Core.Exceptions;
+using Microsoft.AspNetCore.Diagnostics;
+
+namespace FSH.Framework.Web.Exceptions;
+
+public sealed class GlobalExceptionHandler : IExceptionHandler
+{
+    private readonly ILogger<GlobalExceptionHandler> _logger;
+
+    public async ValueTask<bool> TryHandleAsync(
+        HttpContext context,
+        Exception exception,
+        CancellationToken ct)
+    {
+        _logger.LogError(exception, "Unhandled exception occurred");
+
+        var (statusCode, title, errors) = exception switch
+        {
+            NotFoundException notFound => (
+                StatusCodes.Status404NotFound,
+                "Resource Not Found",
+                new[] { notFound.Message }
+            ),
+            CustomException custom => (
+                (int)custom.StatusCode,
+                custom.Message,
+                custom.ErrorMessages.ToArray()
+            ),
+            _ => (
+                StatusCodes.Status500InternalServerError,
+                "Internal Server Error",
+                new[] { "An unexpected error occurred." }
+            )
+        };
+
+        context.Response.StatusCode = statusCode;
+        await context.Response.WriteAsJsonAsync(new
+        {
+            Status = statusCode,
+            Title = title,
+            Errors = errors
+        }, ct);
+
+        return true;
+    }
+}
+```
+
+### 6. Module System
+
+<CodeGroup>
+```csharp IModule.cs
+namespace FSH.Framework.Web.Modules;
+
+public interface IModule
+{
+    void ConfigureServices(IHostApplicationBuilder builder);
+    void MapEndpoints(IEndpointRouteBuilder endpoints);
+}
+```
+
+```csharp CatalogModule.cs
+using FSH.Framework.Web.Modules;
+
+[FshModule("catalog")]
+public sealed class CatalogModule : IModule
+{
+    public void ConfigureServices(IHostApplicationBuilder builder)
+    {
+        // Register module services
+        builder.Services.AddHeroDbContext<CatalogDbContext>();
+        builder.Services.AddMediator();
+        builder.Services.AddValidatorsFromAssembly(typeof(CatalogModule).Assembly);
+    }
+
+    public void MapEndpoints(IEndpointRouteBuilder endpoints)
+    {
+        var group = endpoints.MapGroup("/api/v1/products")
+            .WithTags("Products")
+            .WithOpenApi();
+
+        // Map feature endpoints
+        group.MapGetProductsEndpoint();
+        group.MapGetProductByIdEndpoint();
+        group.MapCreateProductEndpoint();
+    }
+}
+```
+
+```csharp Program.cs (Module Discovery)
+app.UseHeroPlatform(options =>
+{
+    options.MapModules = true;  // Auto-discovers and registers modules
+});
+```
+</CodeGroup>
+
+### 7. API Versioning
+
+```csharp VersioningExtensions.cs
+namespace FSH.Framework.Web.Versioning;
+
+public static IServiceCollection AddHeroVersioning(
+    this IServiceCollection services)
+{
+    services.AddApiVersioning(options =>
+    {
+        options.DefaultApiVersion = new ApiVersion(1);
+        options.ReportApiVersions = true;
+        options.AssumeDefaultVersionWhenUnspecified = true;
+        options.ApiVersionReader = new UrlSegmentApiVersionReader();
+    });
+
+    return services;
+}
+```
+
+Use in endpoints:
+
+```csharp
+endpoints.MapGroup("/api/v{version:apiVersion}/products")
+    .HasApiVersion(1)
+    .HasApiVersion(2);
+```
+
+### 8. Health Checks
+
+```csharp HealthEndpoints.cs
+namespace FSH.Framework.Web.Health;
+
+public static IEndpointRouteBuilder MapHeroHealthEndpoints(
+    this IEndpointRouteBuilder endpoints)
+{
+    endpoints.MapHealthChecks("/health");
+    endpoints.MapHealthChecks("/health/ready");
+    endpoints.MapHealthChecks("/health/live");
+
+    return endpoints;
+}
+```
+
+Access health endpoints:
+- `GET /health` - Overall health
+- `GET /health/ready` - Readiness probe (K8s)
+- `GET /health/live` - Liveness probe (K8s)
+
+### 9. Observability (OpenTelemetry)
+
+```csharp OpenTelemetryExtensions.cs
+namespace FSH.Framework.Web.Observability.OpenTelemetry;
+
+public static IHostApplicationBuilder AddHeroOpenTelemetry(
+    this IHostApplicationBuilder builder)
+{
+    builder.Services.AddOptions<OpenTelemetryOptions>()
+        .BindConfiguration(nameof(OpenTelemetryOptions));
+
+    builder.Services.AddOpenTelemetry()
+        .WithMetrics(metrics =>
+        {
+            metrics.AddAspNetCoreInstrumentation();
+            metrics.AddHttpClientInstrumentation();
+            metrics.AddRuntimeInstrumentation();
+        })
+        .WithTracing(tracing =>
+        {
+            tracing.AddAspNetCoreInstrumentation();
+            tracing.AddHttpClientInstrumentation();
+            tracing.AddEntityFrameworkCoreInstrumentation();
+            tracing.AddSource("FSH.*");
+        });
+
+    // Export to console, OTLP, or Aspire dashboard
+    builder.AddOpenTelemetryExporters();
+
+    return builder;
+}
+```
+
+### 10. Logging (Serilog)
+
+```csharp SerilogExtensions.cs
+namespace FSH.Framework.Web.Observability.Logging.Serilog;
+
+public static IHostApplicationBuilder AddHeroLogging(
+    this IHostApplicationBuilder builder)
+{
+    builder.Services.AddSerilog((services, loggerConfig) =>
+    {
+        loggerConfig
+            .ReadFrom.Configuration(builder.Configuration)
+            .Enrich.FromLogContext()
+            .Enrich.WithMachineName()
+            .Enrich.WithThreadId()
+            .Enrich.With<HttpRequestContextEnricher>()
+            .WriteTo.Console()
+            .WriteTo.File("logs/log-.txt", rollingInterval: RollingInterval.Day);
+    });
+
+    return builder;
+}
+```
+
+## Minimal API Extensions
+
+### Endpoint Metadata
+
+```csharp EndpointExtensions.cs
+endpoints.MapPost("/products", CreateProductHandler)
+    .WithName("CreateProduct")
+    .WithSummary("Create a new product")
+    .WithDescription("Creates a new product in the catalog")
+    .WithTags("Products")
+    .WithOpenApi()
+    .RequirePermission(CatalogPermissions.Products.Create)
+    .Produces<Guid>(StatusCodes.Status201Created)
+    .ProducesValidationProblem();
+```
+
+### Permission-Based Authorization
+
+```csharp AuthorizationExtensions.cs
+using FSH.Framework.Shared.Identity.Authorization;
+
+public static RouteHandlerBuilder RequirePermission(
+    this RouteHandlerBuilder builder,
+    string permission)
+{
+    return builder.RequireAuthorization(policy =>
+        policy.RequireClaim("permission", permission));
+}
+```
+
+## Best Practices
+
+<Steps>
+  <Step title="Use AddHeroPlatform">
+    Always use `AddHeroPlatform()` and `UseHeroPlatform()` for consistent configuration.
+  </Step>
+  <Step title="Enable Only What You Need">
+    Disable unused features (caching, jobs, mailing) to reduce dependencies.
+  </Step>
+  <Step title="Configure via appsettings.json">
+    Use `IOptions<T>` pattern for all configuration.
+  </Step>
+  <Step title="Follow Module Pattern">
+    Organize features into modules implementing `IModule`.
+  </Step>
+  <Step title="Use Rate Limiting">
+    Protect auth endpoints and public APIs with rate limiting.
+  </Step>
+</Steps>
+
+## Package Reference
+
+```xml YourModule.csproj
+<ItemGroup>
+  <ProjectReference Include="..\..\BuildingBlocks\Web\FSH.Framework.Web.csproj" />
+</ItemGroup>
+```
+
+## Related Resources
+
+<CardGroup cols={2}>
+  <Card title="OpenAPI/Swagger" icon="book" href="https://learn.microsoft.com/en-us/aspnet/core/fundamentals/openapi">
+    ASP.NET Core OpenAPI documentation
+  </Card>
+  <Card title="Rate Limiting" icon="gauge" href="https://learn.microsoft.com/en-us/aspnet/core/performance/rate-limit">
+    ASP.NET Core rate limiting
+  </Card>
+  <Card title="Minimal APIs" icon="code" href="https://learn.microsoft.com/en-us/aspnet/core/fundamentals/minimal-apis">
+    Minimal APIs overview
+  </Card>
+  <Card title="OpenTelemetry" icon="chart-line" href="https://opentelemetry.io/docs/">
+    Observability with OpenTelemetry
+  </Card>
+</CardGroup>

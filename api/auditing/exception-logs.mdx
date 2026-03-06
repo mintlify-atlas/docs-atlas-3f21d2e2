@@ -1,0 +1,331 @@
+---
+title: Exception Audit Logs
+description: Query exception and error audit events
+---
+
+## Get Exception Audits
+
+Retrieve audit events related to exceptions and errors.
+
+<CodeGroup>
+```http GET /api/v1/audits/exceptions
+GET /api/v1/audits/exceptions?severity=Error&fromUtc=2026-03-01T00:00:00Z
+```
+
+```bash cURL
+curl -X GET 'https://api.example.com/api/v1/audits/exceptions?severity=Error&fromUtc=2026-03-01T00:00:00Z' \
+  -H 'Authorization: Bearer {token}'
+```
+
+```csharp C#
+var query = new GetExceptionAuditsQuery
+{
+    Severity = AuditSeverity.Error,
+    Area = ExceptionArea.Api,
+    FromUtc = new DateTime(2026, 3, 1, 0, 0, 0, DateTimeKind.Utc),
+    ToUtc = DateTime.UtcNow
+};
+var audits = await mediator.Send(query, cancellationToken);
+```
+</CodeGroup>
+
+### Query Parameters
+
+<ParamField query="area" type="enum">
+  Filter by subsystem where exception occurred:
+  - `Api` - REST API endpoints
+  - `Worker` - Background workers and jobs
+  - `Ui` - User interface
+  - `Infra` - Infrastructure and framework code
+  - `Unknown` - Cannot determine source
+</ParamField>
+
+<ParamField query="severity" type="enum">
+  Filter by exception severity:
+  - `Warning` - Handled exceptions, non-critical
+  - `Error` - Errors that were caught and handled
+  - `Critical` - Severe errors requiring immediate attention
+</ParamField>
+
+<ParamField query="exceptionType" type="string">
+  Filter by exception type name (e.g., "NullReferenceException", "ValidationException")
+</ParamField>
+
+<ParamField query="routeOrLocation" type="string">
+  Filter by route (for API) or code location where exception occurred
+</ParamField>
+
+<ParamField query="fromUtc" type="datetime">
+  Start date/time for audit events (UTC)
+</ParamField>
+
+<ParamField query="toUtc" type="datetime">
+  End date/time for audit events (UTC)
+</ParamField>
+
+### Authorization
+
+Requires `Permissions.Auditing.View` permission.
+
+### Response
+
+Returns an array of exception audit summary objects.
+
+<ResponseField name="id" type="uuid">
+  Unique audit event identifier
+</ResponseField>
+
+<ResponseField name="occurredAtUtc" type="datetime">
+  When the exception occurred
+</ResponseField>
+
+<ResponseField name="eventType" type="enum">
+  Always `Exception` for this endpoint
+</ResponseField>
+
+<ResponseField name="severity" type="enum">
+  Exception severity: `Warning`, `Error`, or `Critical`
+</ResponseField>
+
+<ResponseField name="tenantId" type="string" nullable>
+  Associated tenant identifier
+</ResponseField>
+
+<ResponseField name="userId" type="string" nullable>
+  User who triggered the exception (if applicable)
+</ResponseField>
+
+<ResponseField name="userName" type="string" nullable>
+  Display name of the user
+</ResponseField>
+
+<ResponseField name="traceId" type="string" nullable>
+  Distributed tracing identifier
+</ResponseField>
+
+<ResponseField name="correlationId" type="string" nullable>
+  Correlation identifier for related events
+</ResponseField>
+
+<ResponseField name="requestId" type="string" nullable>
+  HTTP request identifier (for API exceptions)
+</ResponseField>
+
+<ResponseField name="source" type="string" nullable>
+  Module or component where exception occurred
+</ResponseField>
+
+<ResponseField name="tags" type="flags">
+  Bitwise flags for additional metadata
+</ResponseField>
+
+<ResponseExample>
+```json 200 Success
+[
+  {
+    "id": "770fa622-g4bd-63f6-c938-668877662222",
+    "occurredAtUtc": "2026-03-06T14:28:33.789Z",
+    "eventType": "Exception",
+    "severity": "Error",
+    "tenantId": "acme-corp",
+    "userId": "user-123",
+    "userName": "john.doe@acme.com",
+    "traceId": "6dh14h5799d56ec8c5eg141f2g2g6958",
+    "correlationId": "ghi789",
+    "requestId": "0HN1234567892",
+    "source": "FSH.Modules.Catalog",
+    "tags": 0
+  },
+  {
+    "id": "880gb733-h5ce-74g7-d049-779988773333",
+    "occurredAtUtc": "2026-03-06T14:15:20.123Z",
+    "eventType": "Exception",
+    "severity": "Critical",
+    "tenantId": "acme-corp",
+    "userId": null,
+    "userName": null,
+    "traceId": "7ei25i6800e67fd9d6fh252g3h3h7069",
+    "correlationId": "jkl012",
+    "requestId": null,
+    "source": "FSH.BuildingBlocks.Persistence",
+    "tags": 8
+  }
+]
+```
+</ResponseExample>
+
+## Exception Areas
+
+<AccordionGroup>
+  <Accordion title="Api" icon="globe">
+    Exceptions in REST API endpoints:
+    - HTTP request processing errors
+    - Validation failures
+    - Controller/endpoint exceptions
+    - Middleware errors
+    
+    **Common Types:** `ValidationException`, `BadHttpRequestException`, `NotFoundException`
+  </Accordion>
+
+  <Accordion title="Worker" icon="gears">
+    Exceptions in background processing:
+    - Scheduled job failures
+    - Message queue processing errors
+    - Background task exceptions
+    
+    **Common Types:** `JobExecutionException`, `TimeoutException`, `TaskCanceledException`
+  </Accordion>
+
+  <Accordion title="Ui" icon="window">
+    Client-side exceptions (if reported):
+    - JavaScript errors
+    - Rendering failures
+    - Client validation issues
+    
+    **Common Types:** `TypeError`, `ReferenceError`, `NetworkError`
+  </Accordion>
+
+  <Accordion title="Infra" icon="server">
+    Infrastructure and framework exceptions:
+    - Database connection errors
+    - Cache failures
+    - Configuration issues
+    - Third-party service errors
+    
+    **Common Types:** `DbException`, `TimeoutException`, `HttpRequestException`
+  </Accordion>
+
+  <Accordion title="Unknown" icon="question">
+    Exceptions from unclassified sources
+  </Accordion>
+</AccordionGroup>
+
+## Common Use Cases
+
+### Monitor Critical Errors
+
+Track severe errors requiring immediate attention:
+
+```http
+GET /api/v1/audits/exceptions?severity=Critical&fromUtc=2026-03-06T00:00:00Z
+```
+
+Set up alerts for critical exceptions to ensure rapid response.
+
+### Debug API Errors
+
+Find exceptions in API endpoints:
+
+```http
+GET /api/v1/audits/exceptions?area=Api&routeOrLocation=/api/v1/products
+```
+
+Use this to identify problematic endpoints and fix recurring issues.
+
+### Track Exception Types
+
+Identify the most common exception types:
+
+```http
+GET /api/v1/audits/exceptions?exceptionType=NullReferenceException
+```
+
+Helps prioritize bug fixes based on frequency.
+
+### Infrastructure Health
+
+Monitor infrastructure-related exceptions:
+
+```http
+GET /api/v1/audits/exceptions?area=Infra&severity=Error
+```
+
+Detect database issues, cache failures, or third-party service problems.
+
+### Worker Failures
+
+Track background job failures:
+
+```http
+GET /api/v1/audits/exceptions?area=Worker&fromUtc=2026-03-01T00:00:00Z
+```
+
+Ensure scheduled tasks and async jobs complete successfully.
+
+## Exception Severity Classification
+
+Exceptions are automatically classified by severity:
+
+### Warning
+
+Handled exceptions that don't disrupt operations:
+- Validation failures
+- Expected business rule violations
+- Retryable errors that succeeded on retry
+
+```http
+GET /api/v1/audits/exceptions?severity=Warning
+```
+
+### Error
+
+Errors that were caught and handled but indicate problems:
+- Database query failures
+- External service timeouts
+- Unexpected null values
+- File I/O errors
+
+```http
+GET /api/v1/audits/exceptions?severity=Error
+```
+
+### Critical
+
+Severe errors requiring immediate attention:
+- Database connection failures
+- Unhandled exceptions
+- Data corruption
+- Security violations
+- System crashes
+
+```http
+GET /api/v1/audits/exceptions?severity=Critical
+```
+
+## Getting Exception Details
+
+The summary endpoint returns only basic information. To get full exception details including stack traces, use the detail endpoint:
+
+```http
+GET /api/v1/audits/{id}
+```
+
+See [Get Audit By ID](/api/auditing/audit-details) for more information.
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Set Up Alerts" icon="bell">
+    Configure alerts for critical exceptions to ensure rapid response to severe errors.
+  </Card>
+
+  <Card title="Review Regularly" icon="calendar">
+    Schedule regular reviews of error and warning level exceptions to identify patterns.
+  </Card>
+
+  <Card title="Track Trends" icon="chart-line">
+    Monitor exception frequency over time to measure system stability improvements.
+  </Card>
+
+  <Card title="Correlate Events" icon="link">
+    Use `correlationId` to find related events and understand the full context of errors.
+  </Card>
+</CardGroup>
+
+<Warning>
+  Critical exceptions may indicate security issues, data loss, or service outages. Investigate immediately.
+</Warning>
+
+<Info>
+  Exception audits include masked stack traces and error messages. Sensitive data like connection strings and API keys are automatically redacted.
+</Info>

@@ -1,0 +1,438 @@
+---
+title: 'Modular Monolith'
+description: 'How FullStackHero implements a modular monolith with well-defined module boundaries and contracts'
+icon: 'cube'
+---
+
+## What is a Modular Monolith?
+
+A modular monolith combines the deployment simplicity of a monolithic application with the organizational benefits of microservices. The codebase is split into independent **modules** with clear boundaries, but everything runs as a single deployable unit.
+
+### Benefits
+
+<CardGroup cols={2}>
+  <Card title="Simple Deployment" icon="rocket">
+    One deployment unit, no distributed system complexity
+  </Card>
+  <Card title="Clear Boundaries" icon="border-all">
+    Modules communicate through contracts, not internal types
+  </Card>
+  <Card title="Easier Refactoring" icon="arrows-rotate">
+    Extract to microservices later if needed
+  </Card>
+  <Card title="Team Scalability" icon="users">
+    Teams can own modules independently
+  </Card>
+</CardGroup>
+
+## The IModule Interface
+
+All modules implement the `IModule` interface located in `BuildingBlocks/Web/Modules/`:
+
+```csharp src/BuildingBlocks/Web/Modules/IModule.cs
+using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.Hosting;
+
+namespace FSH.Framework.Web.Modules;
+
+public interface IModule
+{
+    // DI/Options/Health/etc. — don't depend on ASP.NET types here
+    void ConfigureServices(IHostApplicationBuilder builder);
+
+    // HTTP wiring — Minimal APIs only
+    void MapEndpoints(IEndpointRouteBuilder endpoints);
+}
+```
+
+### Two Responsibilities
+
+<Steps>
+  <Step title="ConfigureServices">
+    Register services, configure options, add health checks, register DbContext, etc.
+    This runs during application startup.
+  </Step>
+  <Step title="MapEndpoints">
+    Register HTTP endpoints using Minimal APIs.
+    This runs after the app is built but before it starts.
+  </Step>
+</Steps>
+
+<Note>
+  The interface deliberately keeps these concerns separate. `ConfigureServices` doesn't depend on ASP.NET Core types like `HttpContext`.
+</Note>
+
+## Example: Identity Module
+
+Here's how the Identity module implements `IModule`:
+
+<CodeGroup>
+```csharp src/Modules/Identity/IdentityModule.cs (ConfigureServices)
+public class IdentityModule : IModule
+{
+    public void ConfigureServices(IHostApplicationBuilder builder)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        var services = builder.Services;
+        
+        // Register services
+        services.AddScoped<ICurrentUserService, CurrentUserService>();
+        services.AddScoped<ICurrentUser>(sp => sp.GetRequiredService<ICurrentUserService>());
+        services.AddScoped<ITokenService, TokenService>();
+        
+        // User services - focused single-responsibility services
+        services.AddTransient<IUserRegistrationService, UserRegistrationService>();
+        services.AddTransient<IUserProfileService, UserProfileService>();
+        services.AddTransient<IUserStatusService, UserStatusService>();
+        services.AddTransient<IUserRoleService, UserRoleService>();
+        
+        // Register DbContext
+        services.AddHeroDbContext<IdentityDbContext>();
+        
+        // Add eventing support
+        services.AddEventingCore(builder.Configuration);
+        services.AddEventingForDbContext<IdentityDbContext>();
+        
+        // Health checks
+        builder.Services.AddHealthChecks()
+            .AddDbContextCheck<IdentityDbContext>(
+                name: "db:identity",
+                failureStatus: HealthStatus.Unhealthy);
+        
+        // ASP.NET Core Identity
+        services.AddIdentity<FshUser, FshRole>(options =>
+        {
+            options.Password.RequiredLength = IdentityModuleConstants.PasswordLength;
+            options.Password.RequireDigit = false;
+            options.User.RequireUniqueEmail = true;
+        })
+        .AddEntityFrameworkStores<IdentityDbContext>()
+        .AddDefaultTokenProviders();
+        
+        // JWT Authentication
+        services.ConfigureJwtAuth();
+    }
+    
+    // MapEndpoints shown in next section...
+}
+```
+
+```csharp src/Modules/Identity/IdentityModule.cs (MapEndpoints)
+public void MapEndpoints(IEndpointRouteBuilder endpoints)
+{
+    ArgumentNullException.ThrowIfNull(endpoints);
+
+    var apiVersionSet = endpoints.NewApiVersionSet()
+        .HasApiVersion(new ApiVersion(1))
+        .ReportApiVersions()
+        .Build();
+
+    var group = endpoints
+        .MapGroup("api/v{version:apiVersion}/identity")
+        .WithTags("Identity")
+        .WithApiVersionSet(apiVersionSet);
+
+    // Token endpoints
+    group.MapGenerateTokenEndpoint().AllowAnonymous().RequireRateLimiting("auth");
+    group.MapRefreshTokenEndpoint().AllowAnonymous().RequireRateLimiting("auth");
+
+    // Hangfire job for outbox pattern
+    var jobManager = endpoints.ServiceProvider.GetService<IRecurringJobManager>();
+    if (jobManager is not null)
+    {
+        jobManager.AddOrUpdate(
+            "identity-outbox-dispatcher",
+            Job.FromExpression<OutboxDispatcher>(d => d.DispatchAsync(CancellationToken.None)),
+            Cron.Minutely(),
+            new RecurringJobOptions());
+    }
+
+    // Role endpoints
+    group.MapGetRolesEndpoint();
+    group.MapGetRoleByIdEndpoint();
+    group.MapDeleteRoleEndpoint();
+    group.MapGetRolePermissionsEndpoint();
+    group.MapUpdateRolePermissionsEndpoint();
+    group.MapCreateOrUpdateRoleEndpoint();
+
+    // User endpoints
+    group.MapAssignUserRolesEndpoint();
+    group.MapChangePasswordEndpoint();
+    group.MapConfirmEmailEndpoint().RequireRateLimiting("auth");
+    group.MapDeleteUserEndpoint();
+    group.MapGetUserByIdEndpoint();
+    group.MapGetCurrentUserPermissionsEndpoint();
+    group.MapGetMeEndpoint();
+    
+    // Group endpoints
+    group.MapGetGroupsEndpoint();
+    group.MapGetGroupByIdEndpoint();
+    group.MapCreateGroupEndpoint();
+    group.MapUpdateGroupEndpoint();
+    group.MapDeleteGroupEndpoint();
+}
+```
+</CodeGroup>
+
+## Module Loading
+
+Modules are discovered and loaded automatically using the `ModuleLoader`:
+
+```csharp src/BuildingBlocks/Web/Modules/ModuleLoader.cs
+public static class ModuleLoader
+{
+    private static readonly List<IModule> _modules = new();
+    private static bool _modulesLoaded;
+
+    public static IHostApplicationBuilder AddModules(
+        this IHostApplicationBuilder builder, 
+        params Assembly[] assemblies)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+
+        lock (_lock)
+        {
+            if (_modulesLoaded) return builder;
+
+            // Register FluentValidation validators from all modules
+            builder.Services.AddValidatorsFromAssemblies(assemblies);
+
+            // Discover modules using [FshModule] attribute
+            var moduleRegistrations = assemblies
+                .SelectMany(a => a.GetCustomAttributes<FshModuleAttribute>())
+                .Where(r => typeof(IModule).IsAssignableFrom(r.ModuleType))
+                .DistinctBy(r => r.ModuleType)
+                .OrderBy(r => r.Order)
+                .ThenBy(r => r.ModuleType.Name)
+                .Select(r => r.ModuleType);
+
+            foreach (var moduleType in moduleRegistrations)
+            {
+                if (Activator.CreateInstance(moduleType) is not IModule module)
+                {
+                    throw new InvalidOperationException(
+                        $"Unable to create module {moduleType.Name}.");
+                }
+
+                module.ConfigureServices(builder);
+                _modules.Add(module);
+            }
+
+            _modulesLoaded = true;
+        }
+
+        return builder;
+    }
+
+    public static IEndpointRouteBuilder MapModules(this IEndpointRouteBuilder endpoints)
+    {
+        foreach (var m in _modules)
+            m.MapEndpoints(endpoints);
+
+        return endpoints;
+    }
+}
+```
+
+<Note>
+  Module loading is thread-safe and happens only once. Modules are executed in order specified by the `[FshModule(Order = X)]` attribute.
+</Note>
+
+## Using Modules in Program.cs
+
+The host application wires up modules in `Program.cs`:
+
+```csharp src/Playground/Playground.Api/Program.cs
+var builder = WebApplication.CreateBuilder(args);
+
+// Register Mediator with module assemblies
+builder.Services.AddMediator(o =>
+{
+    o.ServiceLifetime = ServiceLifetime.Scoped;
+    o.Assemblies = [
+        typeof(GenerateTokenCommand),
+        typeof(GenerateTokenCommandHandler),
+        typeof(GetTenantStatusQuery),
+        typeof(GetTenantStatusQueryHandler)
+    ];
+});
+
+// Define module assemblies
+var moduleAssemblies = new Assembly[]
+{
+    typeof(IdentityModule).Assembly,
+    typeof(MultitenancyModule).Assembly,
+    typeof(AuditingModule).Assembly
+};
+
+// Add Hero platform (building blocks)
+builder.AddHeroPlatform(o =>
+{
+    o.EnableCaching = true;
+    o.EnableMailing = true;
+    o.EnableJobs = true;
+});
+
+// Load modules
+builder.AddModules(moduleAssemblies);
+
+var app = builder.Build();
+
+// Use multi-tenancy middleware
+app.UseHeroMultiTenantDatabases();
+
+// Use Hero platform middleware
+app.UseHeroPlatform(p =>
+{
+    p.MapModules = true;  // Maps all module endpoints
+    p.ServeStaticFiles = true;
+});
+
+await app.RunAsync();
+```
+
+## Module Structure
+
+Each module follows a consistent structure:
+
+```
+Modules/
+└── Identity/
+    ├── Modules.Identity/                     ← Implementation
+    │   ├── IdentityModule.cs                 ← IModule implementation
+    │   ├── Features/                         ← Feature slices
+    │   │   └── v1/
+    │   │       ├── Users/
+    │   │       ├── Roles/
+    │   │       └── Groups/
+    │   ├── Domain/                           ← Domain entities
+    │   │   ├── FshUser.cs
+    │   │   ├── FshRole.cs
+    │   │   └── Group.cs
+    │   ├── Data/                             ← DbContext & configurations
+    │   │   ├── IdentityDbContext.cs
+    │   │   └── Configurations/
+    │   ├── Services/                         ← Domain services
+    │   └── Authorization/                    ← Permissions & policies
+    │
+    └── Modules.Identity.Contracts/           ← Public contracts
+        ├── v1/
+        │   ├── Users/
+        │   │   └── RegisterUser/
+        │   │       └── RegisterUserCommand.cs
+        │   └── Roles/
+        ├── DTOs/
+        │   ├── UserDto.cs
+        │   └── RoleDto.cs
+        └── Services/
+            └── IIdentityService.cs
+```
+
+## Module Contracts
+
+Modules expose contracts through separate `.Contracts` projects:
+
+<CodeGroup>
+```csharp Command Contract
+// In Modules.Identity.Contracts/v1/Groups/CreateGroup/
+using FSH.Modules.Identity.Contracts.DTOs;
+using Mediator;
+
+namespace FSH.Modules.Identity.Contracts.v1.Groups.CreateGroup;
+
+public sealed record CreateGroupCommand(
+    string Name,
+    string? Description,
+    bool IsDefault,
+    List<string>? RoleIds) : ICommand<GroupDto>;
+```
+
+```csharp DTO Contract
+// In Modules.Identity.Contracts/DTOs/
+namespace FSH.Modules.Identity.Contracts.DTOs;
+
+public sealed class GroupDto
+{
+    public Guid Id { get; init; }
+    public string Name { get; init; } = default!;
+    public string? Description { get; init; }
+    public bool IsDefault { get; init; }
+    public bool IsSystemGroup { get; init; }
+    public int MemberCount { get; init; }
+    public IReadOnlyList<string>? RoleIds { get; init; }
+    public IReadOnlyList<string> RoleNames { get; init; } = [];
+    public DateTime CreatedAt { get; init; }
+}
+```
+</CodeGroup>
+
+<Warning>
+  **Critical Rule**: Other modules must never reference module implementations (e.g., `Modules.Identity`), only their contracts (e.g., `Modules.Identity.Contracts`).
+</Warning>
+
+## Benefits of This Approach
+
+<CardGroup cols={2}>
+  <Card title="Explicit Dependencies" icon="link">
+    Module boundaries are enforced at compile-time through project references
+  </Card>
+  <Card title="Independent Testing" icon="flask">
+    Each module can be tested in isolation with its own test project
+  </Card>
+  <Card title="Parallel Development" icon="users">
+    Teams can work on different modules without conflicts
+  </Card>
+  <Card title="Flexible Evolution" icon="chart-line">
+    Modules can be extracted to microservices if scaling requires it
+  </Card>
+</CardGroup>
+
+## Module Communication Patterns
+
+### 1. Direct Mediator Calls (Same Process)
+
+```csharp
+// In another module, inject IMediator
+public class SomeService
+{
+    private readonly IMediator _mediator;
+    
+    public async Task DoSomething()
+    {
+        // Call Identity module command
+        var result = await _mediator.Send(
+            new CreateGroupCommand("Admins", "Administrator group", false, null));
+    }
+}
+```
+
+### 2. Integration Events (Async)
+
+```csharp
+// Publish event from Identity module
+public sealed record UserRegisteredEvent : DomainEvent
+{
+    public Guid UserId { get; init; }
+    public string Email { get; init; } = default!;
+}
+
+// Subscribe in another module
+public class SendWelcomeEmailHandler : IIntegrationEventHandler<UserRegisteredEvent>
+{
+    public async Task Handle(UserRegisteredEvent @event, CancellationToken ct)
+    {
+        // Send welcome email
+    }
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Vertical Slices" href="/architecture/vertical-slices" icon="layer-group">
+    Learn how features are organized within modules
+  </Card>
+  <Card title="CQRS & Mediator" href="/architecture/cqrs-mediator" icon="arrows-split-up-and-left">
+    Understand the command and query pattern
+  </Card>
+</CardGroup>

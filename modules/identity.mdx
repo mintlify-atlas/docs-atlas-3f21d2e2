@@ -1,0 +1,466 @@
+---
+title: 'Identity Module'
+description: 'Authentication, authorization, and user management'
+icon: 'user-shield'
+---
+
+## Overview
+
+The Identity module provides comprehensive authentication and authorization features built on ASP.NET Core Identity. It handles users, roles, permissions, groups, and sessions with JWT-based authentication.
+
+**Module Order:** `100` (loads first)
+
+**API Base Path:** `/api/v1/identity`
+
+## Core Features
+
+<CardGroup cols={2}>
+  <Card title="Users" icon="users">
+    Registration, profiles, status management, and password policies
+  </Card>
+  
+  <Card title="Roles & Permissions" icon="shield">
+    Role-based access control with granular permissions
+  </Card>
+  
+  <Card title="Groups" icon="user-group">
+    User groups with inherited permissions
+  </Card>
+  
+  <Card title="Sessions" icon="clock">
+    JWT token management with refresh and revocation
+  </Card>
+</CardGroup>
+
+## Implementation
+
+The module is defined in `IdentityModule.cs` (identity/Modules.Identity):
+
+```csharp
+namespace FSH.Modules.Identity;
+
+public class IdentityModule : IModule
+{
+    public void ConfigureServices(IHostApplicationBuilder builder)
+    {
+        var services = builder.Services;
+        
+        // Current user context
+        services.AddScoped<ICurrentUserService, CurrentUserService>();
+        services.AddScoped<ICurrentUser>(sp => sp.GetRequiredService<ICurrentUserService>());
+        
+        // User services - single-responsibility pattern
+        services.AddTransient<IUserRegistrationService, UserRegistrationService>();
+        services.AddTransient<IUserProfileService, UserProfileService>();
+        services.AddTransient<IUserStatusService, UserStatusService>();
+        services.AddTransient<IUserRoleService, UserRoleService>();
+        services.AddTransient<IUserPasswordService, UserPasswordService>();
+        services.AddTransient<IUserPermissionService, UserPermissionService>();
+        
+        // Role and token services
+        services.AddTransient<IRoleService, RoleService>();
+        services.AddTransient<ITokenService, TokenService>();
+        
+        // Password policy and history
+        services.Configure<PasswordPolicyOptions>(builder.Configuration.GetSection("PasswordPolicy"));
+        services.AddScoped<IPasswordHistoryService, PasswordHistoryService>();
+        services.AddScoped<IPasswordExpiryService, PasswordExpiryService>();
+        
+        // Session management
+        services.AddScoped<ISessionService, SessionService>();
+        services.AddHostedService<SessionCleanupHostedService>();
+        
+        // Groups and group-derived permissions
+        services.AddScoped<IGroupRoleService, GroupRoleService>();
+        
+        // Database and eventing
+        services.AddHeroDbContext<IdentityDbContext>();
+        services.AddEventingCore(builder.Configuration);
+        services.AddEventingForDbContext<IdentityDbContext>();
+        
+        // ASP.NET Core Identity
+        services.AddIdentity<FshUser, FshRole>(options =>
+        {
+            options.Password.RequiredLength = 8;
+            options.Password.RequireDigit = false;
+            options.Password.RequireLowercase = false;
+            options.Password.RequireNonAlphanumeric = false;
+            options.Password.RequireUppercase = false;
+            options.User.RequireUniqueEmail = true;
+        })
+        .AddEntityFrameworkStores<IdentityDbContext>()
+        .AddDefaultTokenProviders();
+        
+        // JWT authentication
+        services.ConfigureJwtAuth();
+        
+        // Health checks
+        services.AddHealthChecks()
+            .AddDbContextCheck<IdentityDbContext>(
+                name: "db:identity",
+                failureStatus: HealthStatus.Unhealthy);
+    }
+    
+    public void MapEndpoints(IEndpointRouteBuilder endpoints)
+    {
+        var apiVersionSet = endpoints.NewApiVersionSet()
+            .HasApiVersion(new ApiVersion(1))
+            .ReportApiVersions()
+            .Build();
+            
+        var group = endpoints
+            .MapGroup("api/v{version:apiVersion}/identity")
+            .WithTags("Identity")
+            .WithApiVersionSet(apiVersionSet);
+            
+        // Map all endpoints...
+    }
+}
+```
+
+## User Management
+
+### User Endpoints
+
+| Method | Endpoint | Description | Permission |
+|--------|----------|-------------|------------|
+| `POST` | `/users/register` | Admin user registration | `Users.Create` |
+| `POST` | `/users/self-register` | Public self-registration | Anonymous |
+| `GET` | `/users` | List all users | `Users.View` |
+| `GET` | `/users/search` | Search users | `Users.View` |
+| `GET` | `/users/{id}` | Get user by ID | `Users.View` |
+| `GET` | `/users/me` | Get current user profile | Authenticated |
+| `PUT` | `/users/{id}` | Update user | `Users.Update` |
+| `DELETE` | `/users/{id}` | Delete user | `Users.Delete` |
+| `POST` | `/users/{id}/toggle-status` | Activate/deactivate | `Users.Update` |
+| `POST` | `/users/{id}/change-password` | Change password | `Users.Update` |
+| `POST` | `/users/{id}/reset-password` | Reset password | `Users.Update` |
+| `GET` | `/users/{id}/permissions` | Get user permissions | `Users.View` |
+
+### User Services
+
+The module uses specialized services following single-responsibility principle:
+
+<CodeGroup>
+```csharp User Registration
+public interface IUserRegistrationService
+{
+    Task<string> RegisterAsync(
+        string email,
+        string userName,
+        string password,
+        string? firstName,
+        string? lastName,
+        string? phoneNumber,
+        CancellationToken cancellationToken);
+}
+```
+
+```csharp User Profile
+public interface IUserProfileService
+{
+    Task<UserDetailsDto> GetAsync(string userId, CancellationToken cancellationToken);
+    Task UpdateAsync(string userId, UpdateUserRequest request, CancellationToken cancellationToken);
+}
+```
+
+```csharp Password Management
+public interface IUserPasswordService
+{
+    Task ChangePasswordAsync(string userId, string currentPassword, string newPassword, CancellationToken cancellationToken);
+    Task ResetPasswordAsync(string userId, string newPassword, CancellationToken cancellationToken);
+    Task<bool> ValidatePasswordAsync(string userId, string password, CancellationToken cancellationToken);
+}
+```
+</CodeGroup>
+
+## Roles & Permissions
+
+### Role Endpoints
+
+| Method | Endpoint | Description | Permission |
+|--------|----------|-------------|------------|
+| `GET` | `/roles` | List all roles | `Roles.View` |
+| `GET` | `/roles/{id}` | Get role by ID | `Roles.View` |
+| `GET` | `/roles/{id}/permissions` | Get role permissions | `Roles.View` |
+| `POST` | `/roles` | Create or update role | `Roles.Create` |
+| `PUT` | `/roles/{id}/permissions` | Update permissions | `Roles.Update` |
+| `DELETE` | `/roles/{id}` | Delete role | `Roles.Delete` |
+
+### User-Role Association
+
+| Method | Endpoint | Description | Permission |
+|--------|----------|-------------|------------|
+| `GET` | `/users/{id}/roles` | Get user's roles | `Users.View` |
+| `POST` | `/users/{id}/roles` | Assign roles to user | `Users.Update` |
+
+### Permission System
+
+Endpoints use `.RequirePermission()` for authorization:
+
+```csharp
+group.MapGetUsersListEndpoint()
+    .WithName("ListUsers")
+    .WithSummary("List users")
+    .RequirePermission(IdentityPermissionConstants.Users.View);
+```
+
+Permission constants (identity/Contracts/v1):
+
+```csharp
+public static class IdentityPermissionConstants
+{
+    public static class Users
+    {
+        public const string View = "Permissions.Identity.Users.View";
+        public const string Create = "Permissions.Identity.Users.Create";
+        public const string Update = "Permissions.Identity.Users.Update";
+        public const string Delete = "Permissions.Identity.Users.Delete";
+    }
+    
+    public static class Roles
+    {
+        public const string View = "Permissions.Identity.Roles.View";
+        public const string Create = "Permissions.Identity.Roles.Create";
+        public const string Update = "Permissions.Identity.Roles.Update";
+        public const string Delete = "Permissions.Identity.Roles.Delete";
+    }
+}
+```
+
+## Groups
+
+Groups allow organizing users and assigning permissions at the group level.
+
+### Group Endpoints
+
+| Method | Endpoint | Description | Permission |
+|--------|----------|-------------|------------|
+| `GET` | `/groups` | List all groups | `Groups.View` |
+| `GET` | `/groups/{id}` | Get group by ID | `Groups.View` |
+| `POST` | `/groups` | Create group | `Groups.Create` |
+| `PUT` | `/groups/{id}` | Update group | `Groups.Update` |
+| `DELETE` | `/groups/{id}` | Delete group | `Groups.Delete` |
+| `GET` | `/groups/{id}/members` | Get group members | `Groups.View` |
+| `POST` | `/groups/{id}/members` | Add users to group | `Groups.Update` |
+| `DELETE` | `/groups/{id}/members/{userId}` | Remove user from group | `Groups.Update` |
+| `GET` | `/users/{id}/groups` | Get user's groups | `Users.View` |
+
+### Group-Derived Permissions
+
+Users inherit permissions from their groups via `IGroupRoleService`:
+
+```csharp
+public interface IGroupRoleService
+{
+    Task<IEnumerable<string>> GetGroupPermissionsAsync(
+        string userId, 
+        CancellationToken cancellationToken);
+}
+```
+
+## Sessions
+
+Session management provides JWT token tracking and revocation.
+
+### User Session Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/sessions/my` | Get current user's sessions |
+| `DELETE` | `/sessions/{id}` | Revoke a session |
+| `DELETE` | `/sessions` | Revoke all sessions |
+
+### Admin Session Endpoints
+
+| Method | Endpoint | Description | Permission |
+|--------|----------|-------------|------------|
+| `GET` | `/users/{id}/sessions` | Get user's sessions | `Users.View` |
+| `DELETE` | `/users/{id}/sessions/{sessionId}` | Revoke user session | `Users.Update` |
+| `DELETE` | `/users/{id}/sessions` | Revoke all user sessions | `Users.Update` |
+
+### Session Cleanup
+
+Expired sessions are automatically cleaned up by `SessionCleanupHostedService`:
+
+```csharp
+services.AddScoped<ISessionService, SessionService>();
+services.AddHostedService<SessionCleanupHostedService>();
+```
+
+## Authentication
+
+### Token Endpoints
+
+| Method | Endpoint | Description | Rate Limited |
+|--------|----------|-------------|-------------|
+| `POST` | `/tokens` | Generate access token | Yes |
+| `POST` | `/tokens/refresh` | Refresh access token | Yes |
+
+### JWT Configuration
+
+Configure JWT options in `appsettings.json`:
+
+```json
+{
+  "JwtOptions": {
+    "Issuer": "fullstackhero",
+    "Audience": "fullstackhero-api",
+    "SigningKey": "your-256-bit-secret-key-min-32-chars",
+    "AccessTokenMinutes": 30,
+    "RefreshTokenDays": 7
+  }
+}
+```
+
+<Warning>
+  The `SigningKey` must be at least 32 characters long. Never commit secrets to source control.
+</Warning>
+
+### JWT Options Model
+
+```csharp
+public class JwtOptions : IValidatableObject
+{
+    public string Issuer { get; init; } = string.Empty;
+    public string Audience { get; init; } = string.Empty;
+    public string SigningKey { get; init; } = string.Empty;
+    public int AccessTokenMinutes { get; init; } = 30;
+    public int RefreshTokenDays { get; init; } = 7;
+}
+```
+
+## Password Policy
+
+Enforce password history and expiry policies.
+
+### Configuration
+
+```json
+{
+  "PasswordPolicy": {
+    "PasswordHistoryCount": 5,
+    "PasswordExpiryDays": 90,
+    "PasswordExpiryWarningDays": 14,
+    "EnforcePasswordExpiry": true
+  }
+}
+```
+
+### Password Policy Options
+
+```csharp
+public class PasswordPolicyOptions
+{
+    /// <summary>Number of previous passwords to keep in history (prevent reuse)</summary>
+    public int PasswordHistoryCount { get; set; } = 5;
+
+    /// <summary>Number of days before password expires and must be changed</summary>
+    public int PasswordExpiryDays { get; set; } = 90;
+
+    /// <summary>Number of days before expiry to show warning to user</summary>
+    public int PasswordExpiryWarningDays { get; set; } = 14;
+
+    /// <summary>Set to false to disable password expiry enforcement</summary>
+    public bool EnforcePasswordExpiry { get; set; } = true;
+}
+```
+
+### Services
+
+<CodeGroup>
+```csharp Password History
+public interface IPasswordHistoryService
+{
+    Task<bool> IsPasswordInHistoryAsync(
+        string userId, 
+        string password, 
+        CancellationToken cancellationToken);
+        
+    Task AddPasswordToHistoryAsync(
+        string userId, 
+        string passwordHash, 
+        CancellationToken cancellationToken);
+}
+```
+
+```csharp Password Expiry
+public interface IPasswordExpiryService
+{
+    Task<bool> IsPasswordExpiredAsync(
+        string userId, 
+        CancellationToken cancellationToken);
+        
+    Task<int> GetDaysUntilExpiryAsync(
+        string userId, 
+        CancellationToken cancellationToken);
+}
+```
+</CodeGroup>
+
+## Email Confirmation
+
+| Method | Endpoint | Description | Rate Limited |
+|--------|----------|-------------|-------------|
+| `POST` | `/users/confirm-email` | Confirm email address | Yes |
+
+## Database Context
+
+The module uses `IdentityDbContext` for persistence:
+
+```csharp
+public class IdentityDbContext : DbContext
+{
+    public DbSet<FshUser> Users { get; set; }
+    public DbSet<FshRole> Roles { get; set; }
+    public DbSet<IdentityUserRole<string>> UserRoles { get; set; }
+    public DbSet<IdentityUserClaim<string>> UserClaims { get; set; }
+    public DbSet<IdentityRoleClaim<string>> RoleClaims { get; set; }
+    public DbSet<Group> Groups { get; set; }
+    public DbSet<GroupMember> GroupMembers { get; set; }
+    public DbSet<Session> Sessions { get; set; }
+    public DbSet<PasswordHistory> PasswordHistory { get; set; }
+}
+```
+
+## Events
+
+The Identity module publishes integration events for cross-module communication:
+
+- `UserRegisteredEvent`
+- `UserDeletedEvent`
+- `UserStatusChangedEvent`
+- `RoleCreatedEvent`
+- `RolePermissionsUpdatedEvent`
+
+```csharp
+services.AddEventingCore(builder.Configuration);
+services.AddEventingForDbContext<IdentityDbContext>();
+services.AddIntegrationEventHandlers(typeof(IdentityModule).Assembly);
+```
+
+## Metrics
+
+The module includes Prometheus-compatible metrics:
+
+```csharp
+services.AddSingleton<IdentityMetrics>();
+```
+
+Metrics tracked:
+- User registrations
+- Login attempts (success/failure)
+- Token generations
+- Password changes
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Multitenancy Module" icon="building" href="/modules/multitenancy">
+    Learn about tenant isolation and provisioning
+  </Card>
+  
+  <Card title="Creating Modules" icon="plus" href="/modules/creating-modules">
+    Build your own custom modules
+  </Card>
+</CardGroup>

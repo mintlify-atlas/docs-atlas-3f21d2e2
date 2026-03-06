@@ -1,0 +1,529 @@
+---
+title: Observability
+description: OpenTelemetry integration for traces, metrics, and logs
+icon: chart-line
+---
+
+FullStackHero provides comprehensive observability using [OpenTelemetry](https://opentelemetry.io/), enabling you to monitor, trace, and debug your application in production. The system collects traces, metrics, and logs and exports them to your observability backend.
+
+## Overview
+
+The observability system provides:
+
+- **Distributed Tracing**: Track requests across services and modules
+- **Metrics Collection**: Monitor performance, resource usage, and custom metrics
+- **Structured Logging**: Centralized logs with correlation IDs
+- **OTLP Export**: Send telemetry to Jaeger, Grafana, DataDog, or any OTLP-compatible backend
+- **Automatic Instrumentation**: Built-in instrumentation for HTTP, EF Core, Redis, and more
+
+## Configuration
+
+Configure OpenTelemetry in `appsettings.json`:
+
+```json appsettings.json
+{
+  "OpenTelemetryOptions": {
+    "Enabled": true,
+    "Tracing": {
+      "Enabled": true
+    },
+    "Metrics": {
+      "Enabled": true,
+      "MeterNames": [
+        "FSH.Modules.Identity",
+        "FSH.Modules.Multitenancy",
+        "FSH.Modules.Auditing"
+      ]
+    },
+    "Exporter": {
+      "Otlp": {
+        "Enabled": true,
+        "Endpoint": "http://localhost:4317",
+        "Protocol": "grpc"
+      }
+    },
+    "Jobs": { "Enabled": true },
+    "Mediator": { "Enabled": true },
+    "Http": {
+      "Histograms": {
+        "Enabled": true
+      }
+    },
+    "Data": {
+      "FilterEfStatements": true,
+      "FilterRedisCommands": true
+    }
+  }
+}
+```
+
+### OpenTelemetryOptions
+
+<ParamField path="Enabled" type="bool" default="true">
+  Enable or disable OpenTelemetry globally.
+</ParamField>
+
+<ParamField path="Tracing.Enabled" type="bool" default="true">
+  Enable distributed tracing.
+</ParamField>
+
+<ParamField path="Metrics.Enabled" type="bool" default="true">
+  Enable metrics collection.
+</ParamField>
+
+<ParamField path="Metrics.MeterNames" type="string[]">
+  List of custom meter names to export. Each module can define its own meter.
+</ParamField>
+
+<ParamField path="Exporter.Otlp.Enabled" type="bool" default="true">
+  Enable OTLP (OpenTelemetry Protocol) exporter.
+</ParamField>
+
+<ParamField path="Exporter.Otlp.Endpoint" type="string" required>
+  OTLP collector endpoint. Typically `http://localhost:4317` for gRPC.
+</ParamField>
+
+<ParamField path="Exporter.Otlp.Protocol" type="string" default="grpc">
+  Protocol to use: `grpc` or `http/protobuf`.
+</ParamField>
+
+<ParamField path="Jobs.Enabled" type="bool" default="true">
+  Enable tracing for Hangfire background jobs.
+</ParamField>
+
+<ParamField path="Mediator.Enabled" type="bool" default="true">
+  Enable tracing for Mediator commands and queries.
+</ParamField>
+
+<ParamField path="Http.Histograms.Enabled" type="bool" default="true">
+  Collect HTTP request duration histograms.
+</ParamField>
+
+<ParamField path="Data.FilterEfStatements" type="bool" default="true">
+  Filter out verbose Entity Framework SQL statements from traces.
+</ParamField>
+
+<ParamField path="Data.FilterRedisCommands" type="bool" default="true">
+  Filter out verbose Redis commands from traces.
+</ParamField>
+
+## Distributed Tracing
+
+### Automatic Instrumentation
+
+OpenTelemetry automatically traces:
+
+- **ASP.NET Core HTTP requests**
+- **HTTP client requests** (outgoing API calls)
+- **Entity Framework Core queries**
+- **PostgreSQL/MSSQL database operations** (via Npgsql)
+- **Redis operations**
+- **Mediator commands and queries** (when `Mediator.Enabled` is true)
+- **Hangfire background jobs** (when `Jobs.Enabled` is true)
+
+### Tracing Configuration
+
+```csharp Extensions.cs
+tracing
+    .SetResourceBuilder(resourceBuilder)
+    .AddAspNetCoreInstrumentation(instrumentation =>
+    {
+        instrumentation.Filter = context => 
+            !IsHealthCheck(context.Request.Path);
+        instrumentation.EnrichWithHttpRequest = EnrichWithHttpRequest;
+        instrumentation.EnrichWithHttpResponse = EnrichWithHttpResponse;
+    })
+    .AddHttpClientInstrumentation()
+    .AddNpgsql()
+    .AddEntityFrameworkCoreInstrumentation()
+    .AddRedisInstrumentation(redis =>
+    {
+        if (options.Data.FilterRedisCommands)
+        {
+            redis.SetVerboseDatabaseStatements = false;
+        }
+    })
+    .AddSource(builder.Environment.ApplicationName)
+    .AddSource("FSH.Hangfire");
+
+if (options.Exporter.Otlp.Enabled)
+{
+    tracing.AddOtlpExporter(otlp =>
+    {
+        ConfigureOtlpExporter(options.Exporter.Otlp, otlp);
+    });
+}
+```
+
+### Custom Spans
+
+Create custom spans for your application logic:
+
+```csharp
+public class MyService
+{
+    private readonly ActivitySource _activitySource;
+
+    public MyService(ActivitySource activitySource)
+    {
+        _activitySource = activitySource;
+    }
+
+    public async Task ProcessOrderAsync(Guid orderId, CancellationToken ct)
+    {
+        using var activity = _activitySource.StartActivity(
+            "ProcessOrder",
+            ActivityKind.Internal);
+        
+        activity?.SetTag("order.id", orderId);
+        activity?.SetTag("order.status", "processing");
+
+        try
+        {
+            // Your business logic here
+            await Task.Delay(100, ct);
+            
+            activity?.SetTag("order.status", "completed");
+        }
+        catch (Exception ex)
+        {
+            activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
+            throw;
+        }
+    }
+}
+```
+
+### Mediator Tracing
+
+The `MediatorTracingBehavior` automatically creates spans for all commands and queries:
+
+```csharp
+public class MediatorTracingBehavior<TRequest, TResponse> 
+    : IPipelineBehavior<TRequest, TResponse>
+    where TRequest : IRequest<TResponse>
+{
+    private readonly ActivitySource _activitySource;
+
+    public async ValueTask<TResponse> Handle(
+        TRequest message,
+        CancellationToken cancellationToken,
+        MessageHandlerDelegate<TRequest, TResponse> next)
+    {
+        var requestName = typeof(TRequest).Name;
+        
+        using var activity = _activitySource.StartActivity(
+            $"Mediator: {requestName}",
+            ActivityKind.Internal);
+        
+        activity?.SetTag("mediator.request_type", requestName);
+
+        try
+        {
+            var response = await next(message, cancellationToken);
+            activity?.SetStatus(ActivityStatusCode.Ok);
+            return response;
+        }
+        catch (Exception ex)
+        {
+            activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
+            throw;
+        }
+    }
+}
+```
+
+## Metrics
+
+### Automatic Metrics
+
+OpenTelemetry collects metrics for:
+
+- **HTTP requests**: Request count, duration, status codes
+- **HTTP client requests**: Outgoing API call metrics
+- **Database queries**: Query count, duration
+- **Runtime metrics**: CPU, memory, GC, thread pool
+
+### Metrics Configuration
+
+```csharp Extensions.cs
+metrics
+    .SetResourceBuilder(resourceBuilder)
+    .AddAspNetCoreInstrumentation()
+    .AddHttpClientInstrumentation()
+    .AddNpgsqlInstrumentation()
+    .AddRuntimeInstrumentation();
+
+// Apply histogram buckets for HTTP server duration
+if (options.Http.Histograms.Enabled)
+{
+    metrics.AddView(
+        "http.server.duration",
+        new ExplicitBucketHistogramConfiguration
+        {
+            Boundaries = GetHistogramBuckets(options)
+        });
+}
+
+foreach (var meterName in options.Metrics.MeterNames ?? Array.Empty<string>())
+{
+    metrics.AddMeter(meterName);
+}
+```
+
+### Custom Metrics
+
+Define custom metrics using `Meter`:
+
+```csharp IdentityMetrics.cs
+public class IdentityMetrics
+{
+    private readonly Meter _meter;
+    private readonly Counter<long> _tokenGeneratedCounter;
+    private readonly Counter<long> _loginFailedCounter;
+
+    public IdentityMetrics()
+    {
+        _meter = new Meter("FSH.Modules.Identity");
+        
+        _tokenGeneratedCounter = _meter.CreateCounter<long>(
+            "identity.token_generated",
+            description: "Number of tokens generated");
+        
+        _loginFailedCounter = _meter.CreateCounter<long>(
+            "identity.login_failed",
+            description: "Number of failed login attempts");
+    }
+
+    public void TokenGenerated(string userEmail)
+    {
+        _tokenGeneratedCounter.Add(1, 
+            new KeyValuePair<string, object?>("user.email", userEmail));
+    }
+
+    public void LoginFailed(string reason)
+    {
+        _loginFailedCounter.Add(1,
+            new KeyValuePair<string, object?>("failure.reason", reason));
+    }
+}
+```
+
+Register the metrics class:
+
+```csharp
+services.AddSingleton<IdentityMetrics>();
+```
+
+Use it in your handlers:
+
+```csharp
+public class TokenService
+{
+    private readonly IdentityMetrics _metrics;
+
+    public async Task<TokenResponse> IssueAsync(...)
+    {
+        // Issue token logic
+        
+        _metrics.TokenGenerated(userEmail);
+        
+        return response;
+    }
+}
+```
+
+## Structured Logging
+
+FullStackHero uses [Serilog](https://serilog.net/) with OpenTelemetry integration:
+
+```json appsettings.json
+{
+  "Serilog": {
+    "Using": [
+      "Serilog.Sinks.Console",
+      "Serilog.Sinks.OpenTelemetry"
+    ],
+    "Enrich": [
+      "FromLogContext",
+      "WithMachineName",
+      "WithThreadId",
+      "WithCorrelationId",
+      "WithProcessId",
+      "WithProcessName"
+    ],
+    "MinimumLevel": {
+      "Default": "Debug"
+    },
+    "WriteTo": [
+      {
+        "Name": "Console",
+        "Args": {
+          "restrictedToMinimumLevel": "Information"
+        }
+      },
+      {
+        "Name": "OpenTelemetry",
+        "Args": {
+          "endpoint": "http://localhost:4317",
+          "protocol": "grpc",
+          "resourceAttributes": {
+            "service.name": "Playground.Api"
+          }
+        }
+      }
+    ]
+  }
+}
+```
+
+### Correlation IDs
+
+Logs are automatically enriched with correlation IDs for tracing:
+
+```csharp
+_logger.LogInformation(
+    "Processing order {OrderId} for user {UserId}",
+    orderId,
+    userId);
+```
+
+Output:
+
+```json
+{
+  "@t": "2026-03-06T22:30:00.000Z",
+  "@mt": "Processing order {OrderId} for user {UserId}",
+  "OrderId": "123e4567-e89b-12d3-a456-426614174000",
+  "UserId": "987fcdeb-51a2-43f1-b456-789012345678",
+  "CorrelationId": "abc-123-def-456",
+  "TraceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "SpanId": "00f067aa0ba902b7"
+}
+```
+
+## Observability Backends
+
+### Jaeger
+
+Run Jaeger locally:
+
+```bash
+docker run -d --name jaeger \
+  -p 16686:16686 \
+  -p 4317:4317 \
+  jaegertracing/all-in-one:latest
+```
+
+Access the Jaeger UI at `http://localhost:16686`.
+
+### Grafana + Tempo + Loki
+
+Run the full observability stack:
+
+```yaml docker-compose.yml
+version: '3.8'
+services:
+  tempo:
+    image: grafana/tempo:latest
+    command: [ "-config.file=/etc/tempo.yaml" ]
+    volumes:
+      - ./tempo.yaml:/etc/tempo.yaml
+    ports:
+      - "4317:4317"  # OTLP gRPC
+      - "3200:3200"  # Tempo HTTP
+
+  loki:
+    image: grafana/loki:latest
+    ports:
+      - "3100:3100"
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+```
+
+Access Grafana at `http://localhost:3000`.
+
+## Viewing Telemetry
+
+### Traces
+
+View distributed traces in Jaeger or Grafana:
+
+1. Navigate to the tracing UI
+2. Search for traces by service name, operation, or tags
+3. Inspect individual spans to see timing and attributes
+4. Follow traces across services and modules
+
+### Metrics
+
+Query metrics in Grafana:
+
+```promql
+# HTTP request rate
+rate(http_server_request_count[5m])
+
+# Average HTTP response time
+avg(http_server_duration_milliseconds)
+
+# Token generation count
+identity_token_generated_total
+```
+
+### Logs
+
+Search and filter logs in Grafana Loki:
+
+```logql
+{service_name="Playground.Api"} |= "error"
+{service_name="Playground.Api"} | json | UserId = "abc-123"
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use Correlation IDs">
+    Always include correlation IDs in logs to trace requests across the system.
+  </Accordion>
+
+  <Accordion title="Tag Spans with Contextual Information">
+    Add tags like `tenant.id`, `user.id`, `order.id` to spans for easier filtering and debugging.
+  </Accordion>
+
+  <Accordion title="Filter Noisy Traces">
+    Exclude health checks and other noisy endpoints from tracing to reduce overhead.
+  </Accordion>
+
+  <Accordion title="Monitor Key Metrics">
+    Track critical metrics like request rate, error rate, and response time (RED metrics).
+  </Accordion>
+
+  <Accordion title="Set Alerts">
+    Configure alerts for abnormal metrics (e.g., high error rate, slow queries).
+  </Accordion>
+</AccordionGroup>
+
+## Related Topics
+
+<CardGroup cols={2}>
+  <Card title="Health Checks" icon="heart-pulse" href="/features/health-checks">
+    Monitor application health and readiness
+  </Card>
+
+  <Card title="Background Jobs" icon="clock" href="/features/background-jobs">
+    Trace and monitor background job execution
+  </Card>
+
+  <Card title="Rate Limiting" icon="gauge" href="/features/rate-limiting">
+    Monitor rate limit rejections and usage
+  </Card>
+
+  <Card title="Authentication" icon="key" href="/features/authentication">
+    Trace authentication flows and token generation
+  </Card>
+</CardGroup>

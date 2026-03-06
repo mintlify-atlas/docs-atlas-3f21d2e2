@@ -1,0 +1,664 @@
+---
+title: 'Domain-Driven Design'
+description: 'Rich domain models with entities, aggregates, value objects, and domain events'
+icon: 'diagram-project'
+---
+
+## What is Domain-Driven Design?
+
+**Domain-Driven Design (DDD)** is an approach to software development that emphasizes:
+
+<CardGroup cols={2}>
+  <Card title="Ubiquitous Language" icon="comments">
+    Code uses the same terminology as domain experts
+  </Card>
+  <Card title="Rich Domain Models" icon="gem">
+    Business logic lives in entities, not services
+  </Card>
+  <Card title="Bounded Contexts" icon="border-all">
+    Modules represent distinct business domains
+  </Card>
+  <Card title="Domain Events" icon="bell">
+    Important business events are first-class concepts
+  </Card>
+</CardGroup>
+
+## Building Blocks
+
+FullStackHero provides DDD building blocks in `BuildingBlocks/Core/Domain/`:
+
+```
+BuildingBlocks/Core/Domain/
+├── IEntity.cs              ← Entity marker interface
+├── BaseEntity.cs           ← Base entity with domain events
+├── AggregateRoot.cs        ← Aggregate root marker
+├── IDomainEvent.cs         ← Domain event interface
+├── DomainEvent.cs          ← Base domain event
+├── IHasDomainEvents.cs     ← Domain event support
+├── IAuditableEntity.cs     ← Audit metadata
+├── ISoftDeletable.cs       ← Soft delete support
+└── IHasTenant.cs           ← Multi-tenancy support
+```
+
+## Entities
+
+Entities have identity that persists over time. Two entities with the same data but different IDs are different entities.
+
+### IEntity Interface
+
+```csharp src/BuildingBlocks/Core/Domain/IEntity.cs
+namespace FSH.Framework.Core.Domain;
+
+/// <summary>
+/// Represents an entity with a strongly-typed identifier.
+/// </summary>
+/// <typeparam name="TId">The type of the entity identifier.</typeparam>
+public interface IEntity<out TId>
+{
+    /// <summary>
+    /// Gets the entity identifier.
+    /// </summary>
+    TId Id { get; }
+}
+```
+
+### BaseEntity
+
+Provides identity and domain event support:
+
+```csharp src/BuildingBlocks/Core/Domain/BaseEntity.cs
+namespace FSH.Framework.Core.Domain;
+
+/// <summary>
+/// Provides a base implementation for entities with identity and domain events.
+/// </summary>
+/// <typeparam name="TId">The type of the entity identifier.</typeparam>
+public abstract class BaseEntity<TId> : IEntity<TId>, IHasDomainEvents
+{
+    private readonly List<IDomainEvent> _domainEvents = [];
+
+    /// <summary>
+    /// Gets the entity identifier.
+    /// </summary>
+    public TId Id { get; protected set; } = default!;
+
+    /// <summary>
+    /// Gets the domain events raised by this entity.
+    /// </summary>
+    public IReadOnlyCollection<IDomainEvent> DomainEvents => _domainEvents;
+
+    /// <summary>
+    /// Raises and records a domain event for later dispatch.
+    /// </summary>
+    /// <param name="event">The domain event to add.</param>
+    protected void AddDomainEvent(IDomainEvent @event)
+        => _domainEvents.Add(@event);
+
+    /// <summary>
+    /// Clears all recorded domain events.
+    /// </summary>
+    public void ClearDomainEvents() => _domainEvents.Clear();
+}
+```
+
+<Note>
+  `Id` has a protected setter so only the entity itself can set its identity.
+</Note>
+
+### Real Entity Example: Group
+
+```csharp src/Modules/Identity/Domain/Group.cs
+using FSH.Framework.Core.Domain;
+
+namespace FSH.Modules.Identity.Domain;
+
+public class Group : ISoftDeletable
+{
+    public Guid Id { get; private set; }
+    public string Name { get; private set; } = default!;
+    public string? Description { get; private set; }
+    public bool IsDefault { get; private set; }
+    public bool IsSystemGroup { get; private set; }
+    public DateTime CreatedAt { get; private set; }
+    public string? CreatedBy { get; private set; }
+    public DateTime? ModifiedAt { get; private set; }
+    public string? ModifiedBy { get; private set; }
+
+    // ISoftDeletable implementation
+    public bool IsDeleted { get; set; }
+    public DateTimeOffset? DeletedOnUtc { get; set; }
+    public string? DeletedBy { get; set; }
+
+    // Navigation properties
+    public virtual ICollection<GroupRole> GroupRoles { get; private set; } = [];
+    public virtual ICollection<UserGroup> UserGroups { get; private set; } = [];
+
+    // Private constructor for EF Core
+    private Group() { }
+
+    // Factory method - only way to create valid Group
+    public static Group Create(
+        string name, 
+        string? description = null, 
+        bool isDefault = false, 
+        bool isSystemGroup = false, 
+        string? createdBy = null)
+    {
+        return new Group
+        {
+            Id = Guid.NewGuid(),
+            Name = name,
+            Description = description,
+            IsDefault = isDefault,
+            IsSystemGroup = isSystemGroup,
+            CreatedAt = DateTime.UtcNow,
+            CreatedBy = createdBy
+        };
+    }
+
+    // Business methods encapsulate behavior
+    public void Update(string name, string? description, string? modifiedBy = null)
+    {
+        Name = name;
+        Description = description;
+        ModifiedAt = DateTime.UtcNow;
+        ModifiedBy = modifiedBy;
+    }
+
+    public void SetAsDefault(bool isDefault, string? modifiedBy = null)
+    {
+        IsDefault = isDefault;
+        ModifiedAt = DateTime.UtcNow;
+        ModifiedBy = modifiedBy;
+    }
+}
+```
+
+<Note>
+  **Key DDD patterns:**
+  - Private constructor prevents invalid state
+  - Factory method `Create()` ensures valid creation
+  - Business methods encapsulate logic
+  - All setters are private
+</Note>
+
+## Aggregates
+
+An **aggregate** is a cluster of entities and value objects with a defined boundary. The **aggregate root** is the only entity that external code can reference.
+
+### AggregateRoot Base Class
+
+```csharp src/BuildingBlocks/Core/Domain/AggregateRoot.cs
+namespace FSH.Framework.Core.Domain;
+
+/// <summary>
+/// Represents an aggregate root in the domain model.
+/// </summary>
+/// <typeparam name="TId">The type of the aggregate identifier.</typeparam>
+public abstract class AggregateRoot<TId> : BaseEntity<TId>
+{
+    // Put aggregate-wide behaviors/helpers here if needed
+}
+```
+
+### Example: User as Aggregate Root
+
+The `FshUser` entity is an aggregate root that manages password history and sessions:
+
+```csharp src/Modules/Identity/Domain/FshUser.cs
+using FSH.Framework.Core.Domain;
+using FSH.Modules.Identity.Domain.Events;
+using Microsoft.AspNetCore.Identity;
+
+namespace FSH.Modules.Identity.Domain;
+
+public class FshUser : IdentityUser, IHasDomainEvents
+{
+    private readonly List<IDomainEvent> _domainEvents = [];
+
+    public string? FirstName { get; set; }
+    public string? LastName { get; set; }
+    public Uri? ImageUrl { get; set; }
+    public bool IsActive { get; set; }
+    public string? RefreshToken { get; set; }
+    public DateTime RefreshTokenExpiryTime { get; set; }
+    public DateTime LastPasswordChangeDate { get; set; } = DateTime.UtcNow;
+
+    // Navigation properties - aggregate members
+    public virtual ICollection<PasswordHistory> PasswordHistories { get; set; } = [];
+
+    // IHasDomainEvents implementation
+    public IReadOnlyCollection<IDomainEvent> DomainEvents => _domainEvents.AsReadOnly();
+    public void ClearDomainEvents() => _domainEvents.Clear();
+    private void AddDomainEvent(IDomainEvent domainEvent) => _domainEvents.Add(domainEvent);
+
+    /// <summary>Records UserRegisteredEvent. Call after user creation.</summary>
+    public void RecordRegistered(string? tenantId = null)
+    {
+        AddDomainEvent(UserRegisteredEvent.Create(
+            userId: Id,
+            email: Email ?? string.Empty,
+            firstName: FirstName,
+            lastName: LastName,
+            tenantId: tenantId));
+    }
+
+    /// <summary>Records PasswordChangedEvent. Call after password change.</summary>
+    public void RecordPasswordChanged(bool wasReset = false, string? tenantId = null)
+    {
+        AddDomainEvent(PasswordChangedEvent.Create(
+            userId: Id,
+            wasReset: wasReset,
+            tenantId: tenantId));
+    }
+
+    /// <summary>Sets user to active and records UserActivatedEvent.</summary>
+    public void Activate(string? activatedBy = null, string? tenantId = null)
+    {
+        if (IsActive) return;
+        IsActive = true;
+        AddDomainEvent(UserActivatedEvent.Create(
+            userId: Id,
+            activatedBy: activatedBy,
+            tenantId: tenantId));
+    }
+
+    /// <summary>Sets user to inactive and records UserDeactivatedEvent.</summary>
+    public void Deactivate(
+        string? deactivatedBy = null, 
+        string? reason = null, 
+        string? tenantId = null)
+    {
+        if (!IsActive) return;
+        IsActive = false;
+        AddDomainEvent(UserDeactivatedEvent.Create(
+            userId: Id,
+            deactivatedBy: deactivatedBy,
+            reason: reason,
+            tenantId: tenantId));
+    }
+
+    /// <summary>Records UserRoleAssignedEvent. Call after roles are assigned.</summary>
+    public void RecordRolesAssigned(
+        IEnumerable<string> assignedRoles, 
+        string? tenantId = null)
+    {
+        var rolesList = assignedRoles.ToList();
+        if (rolesList.Count == 0) return;
+        
+        AddDomainEvent(UserRoleAssignedEvent.Create(
+            userId: Id,
+            assignedRoles: rolesList,
+            tenantId: tenantId));
+    }
+}
+```
+
+<Note>
+  **Aggregate rules:**
+  - External code cannot directly modify `PasswordHistory` entities
+  - All changes go through the `FshUser` aggregate root
+  - Invariants are enforced by the aggregate root
+</Note>
+
+## Domain Events
+
+Domain events represent something important that happened in the domain.
+
+### IDomainEvent Interface
+
+```csharp src/BuildingBlocks/Core/Domain/IDomainEvent.cs
+namespace FSH.Framework.Core.Domain;
+
+/// <summary>
+/// Represents a domain event with correlation and tenant context.
+/// </summary>
+public interface IDomainEvent
+{
+    /// <summary>Gets the unique event identifier.</summary>
+    Guid EventId { get; }
+
+    /// <summary>Gets the UTC timestamp when the event occurred.</summary>
+    DateTimeOffset OccurredOnUtc { get; }
+
+    /// <summary>Gets the correlation identifier for tracing.</summary>
+    string? CorrelationId { get; }
+
+    /// <summary>Gets the tenant identifier.</summary>
+    string? TenantId { get; }
+}
+```
+
+### Base DomainEvent
+
+```csharp src/BuildingBlocks/Core/Domain/DomainEvent.cs
+namespace FSH.Framework.Core.Domain;
+
+/// <summary>
+/// Base domain event with correlation and tenant context.
+/// </summary>
+public abstract record DomainEvent(
+    Guid EventId,
+    DateTimeOffset OccurredOnUtc,
+    string? CorrelationId = null,
+    string? TenantId = null
+) : IDomainEvent
+{
+    /// <summary>
+    /// Creates a new domain event using the provided factory.
+    /// </summary>
+    public static T Create<T>(Func<Guid, DateTimeOffset, T> factory)
+        where T : DomainEvent
+    {
+        ArgumentNullException.ThrowIfNull(factory);
+        return factory(Guid.NewGuid(), DateTimeOffset.UtcNow);
+    }
+}
+```
+
+### Real Domain Event Example
+
+```csharp src/Modules/Identity/Domain/Events/UserActivatedEvent.cs
+using FSH.Framework.Core.Domain;
+
+namespace FSH.Modules.Identity.Domain.Events;
+
+/// <summary>Raised when a user account is activated.</summary>
+public sealed record UserActivatedEvent(
+    Guid EventId,
+    DateTimeOffset OccurredOnUtc,
+    string UserId,
+    string? ActivatedBy,
+    string? CorrelationId = null,
+    string? TenantId = null
+) : DomainEvent(EventId, OccurredOnUtc, CorrelationId, TenantId)
+{
+    public static UserActivatedEvent Create(
+        string userId, 
+        string? activatedBy = null, 
+        string? correlationId = null, 
+        string? tenantId = null)
+        => new(
+            Guid.NewGuid(), 
+            DateTimeOffset.UtcNow, 
+            userId, 
+            activatedBy, 
+            correlationId, 
+            tenantId);
+}
+```
+
+### Raising Domain Events
+
+Events are raised in aggregate methods:
+
+```csharp
+public void Activate(string? activatedBy = null, string? tenantId = null)
+{
+    if (IsActive) return;
+    
+    IsActive = true;  // Change state
+    
+    // Raise event
+    AddDomainEvent(UserActivatedEvent.Create(
+        userId: Id,
+        activatedBy: activatedBy,
+        tenantId: tenantId));
+}
+```
+
+### Dispatching Domain Events
+
+Events are dispatched automatically after `SaveChangesAsync()` via an interceptor:
+
+```csharp
+public async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+{
+    // Collect events before save
+    var entitiesWithEvents = ChangeTracker.Entries<IHasDomainEvents>()
+        .Select(e => e.Entity)
+        .Where(e => e.DomainEvents.Any())
+        .ToList();
+
+    var domainEvents = entitiesWithEvents
+        .SelectMany(e => e.DomainEvents)
+        .ToList();
+
+    // Save changes
+    var result = await base.SaveChangesAsync(cancellationToken);
+
+    // Dispatch events after successful save
+    foreach (var domainEvent in domainEvents)
+    {
+        await _mediator.Publish(domainEvent, cancellationToken);
+    }
+
+    // Clear events
+    foreach (var entity in entitiesWithEvents)
+    {
+        entity.ClearDomainEvents();
+    }
+
+    return result;
+}
+```
+
+## Cross-Cutting Concerns
+
+### Audit Metadata
+
+```csharp src/BuildingBlocks/Core/Domain/IAuditableEntity.cs
+namespace FSH.Framework.Core.Domain;
+
+/// <summary>Defines audit metadata for an entity.</summary>
+public interface IAuditableEntity
+{
+    /// <summary>Gets the UTC timestamp when the entity was created.</summary>
+    DateTimeOffset CreatedOnUtc { get; }
+
+    /// <summary>Gets the identifier of the creator.</summary>
+    string? CreatedBy { get; }
+
+    /// <summary>Gets the UTC timestamp when the entity was last modified.</summary>
+    DateTimeOffset? LastModifiedOnUtc { get; }
+
+    /// <summary>Gets the identifier of the last modifier.</summary>
+    string? LastModifiedBy { get; }
+}
+```
+
+### Soft Delete
+
+```csharp src/BuildingBlocks/Core/Domain/ISoftDeletable.cs
+namespace FSH.Framework.Core.Domain;
+
+/// <summary>Marks an entity as supporting soft deletion.</summary>
+public interface ISoftDeletable
+{
+    /// <summary>Gets a value indicating whether the entity is deleted.</summary>
+    bool IsDeleted { get; }
+
+    /// <summary>Gets the UTC timestamp when the entity was deleted.</summary>
+    DateTimeOffset? DeletedOnUtc { get; }
+
+    /// <summary>Gets the identifier of the user who deleted the entity.</summary>
+    string? DeletedBy { get; }
+}
+```
+
+Soft-deleted entities are automatically filtered:
+
+```csharp
+modelBuilder.Entity<Group>()
+    .HasQueryFilter(e => !e.IsDeleted);
+```
+
+### Multi-Tenancy
+
+```csharp src/BuildingBlocks/Core/Domain/IHasTenant.cs
+namespace FSH.Framework.Core.Domain;
+
+/// <summary>Associates an entity with a tenant.</summary>
+public interface IHasTenant
+{
+    /// <summary>Gets the tenant identifier.</summary>
+    string TenantId { get; }
+}
+```
+
+Tenant isolation is enforced via global query filters.
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Encapsulation" icon="lock">
+    All setters should be private. Expose behavior through methods.
+  </Card>
+  <Card title="Factory Methods" icon="hammer">
+    Use static `Create()` methods instead of public constructors.
+  </Card>
+  <Card title="Invariant Protection" icon="shield">
+    Validate business rules in entity methods, not in handlers.
+  </Card>
+  <Card title="Domain Events" icon="bell">
+    Raise events for important business operations.
+  </Card>
+</CardGroup>
+
+### Good Entity Design
+
+```csharp
+// ✅ Good: Rich domain model
+public class Order : AggregateRoot<Guid>
+{
+    private readonly List<OrderItem> _items = [];
+    
+    public decimal TotalAmount { get; private set; }
+    public OrderStatus Status { get; private set; }
+    public IReadOnlyCollection<OrderItem> Items => _items.AsReadOnly();
+
+    private Order() { } // EF Core
+
+    public static Order Create(string customerId)
+    {
+        var order = new Order
+        {
+            Id = Guid.NewGuid(),
+            CustomerId = customerId,
+            Status = OrderStatus.Draft,
+            TotalAmount = 0
+        };
+        
+        order.AddDomainEvent(OrderCreatedEvent.Create(order.Id, customerId));
+        return order;
+    }
+
+    public void AddItem(string productId, int quantity, decimal price)
+    {
+        if (Status != OrderStatus.Draft)
+            throw new InvalidOperationException("Cannot modify submitted order.");
+
+        _items.Add(new OrderItem(productId, quantity, price));
+        RecalculateTotal();
+    }
+
+    public void Submit()
+    {
+        if (Status != OrderStatus.Draft)
+            throw new InvalidOperationException("Order already submitted.");
+        if (!_items.Any())
+            throw new InvalidOperationException("Cannot submit empty order.");
+
+        Status = OrderStatus.Submitted;
+        AddDomainEvent(OrderSubmittedEvent.Create(Id, TotalAmount));
+    }
+
+    private void RecalculateTotal()
+    {
+        TotalAmount = _items.Sum(i => i.Quantity * i.Price);
+    }
+}
+```
+
+### Bad Entity Design
+
+```csharp
+// ❌ Bad: Anemic domain model
+public class Order
+{
+    public Guid Id { get; set; }  // Public setter!
+    public decimal TotalAmount { get; set; }  // No calculation logic
+    public OrderStatus Status { get; set; }  // No validation
+    public List<OrderItem> Items { get; set; } = [];  // Mutable list exposed
+}
+
+// Business logic leaked to service layer
+public class OrderService
+{
+    public async Task SubmitOrder(Guid orderId)
+    {
+        var order = await _repo.GetByIdAsync(orderId);
+        
+        // Business rules in service - BAD!
+        if (order.Status != OrderStatus.Draft)
+            throw new InvalidOperationException("Order already submitted.");
+        if (!order.Items.Any())
+            throw new InvalidOperationException("Cannot submit empty order.");
+
+        order.Status = OrderStatus.Submitted;
+        await _repo.UpdateAsync(order);
+    }
+}
+```
+
+## Testing Domain Logic
+
+```csharp
+public class FshUserTests
+{
+    [Fact]
+    public void Activate_InactiveUser_ActivatesAndRaisesEvent()
+    {
+        // Arrange
+        var user = new FshUser { IsActive = false, Id = "user-123" };
+
+        // Act
+        user.Activate("admin-456", "tenant-789");
+
+        // Assert
+        Assert.True(user.IsActive);
+        Assert.Single(user.DomainEvents);
+        
+        var @event = user.DomainEvents.First() as UserActivatedEvent;
+        Assert.NotNull(@event);
+        Assert.Equal("user-123", @event.UserId);
+        Assert.Equal("admin-456", @event.ActivatedBy);
+        Assert.Equal("tenant-789", @event.TenantId);
+    }
+
+    [Fact]
+    public void Activate_AlreadyActive_DoesNotRaiseEvent()
+    {
+        // Arrange
+        var user = new FshUser { IsActive = true };
+
+        // Act
+        user.Activate();
+
+        // Assert
+        Assert.True(user.IsActive);
+        Assert.Empty(user.DomainEvents);
+    }
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Multitenancy" href="/architecture/multitenancy" icon="building">
+    Learn how tenant isolation is implemented
+  </Card>
+  <Card title="CQRS & Mediator" href="/architecture/cqrs-mediator" icon="arrows-split-up-and-left">
+    See how domain entities are used in handlers
+  </Card>
+</CardGroup>

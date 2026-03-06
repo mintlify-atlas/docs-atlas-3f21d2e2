@@ -1,0 +1,519 @@
+---
+title: Persistence Building Block
+description: Repository pattern, specifications, and EF Core extensions for data access
+icon: database
+---
+
+## Overview
+
+The **Persistence** building block provides abstractions for data access using Entity Framework Core. It implements the Repository and Specification patterns for clean, testable data access.
+
+<Note>
+  Persistence follows the Repository pattern — never use `DbContext` directly in handlers or services.
+</Note>
+
+## Key Components
+
+### BaseDbContext
+
+Base database context with multi-tenancy and soft delete support:
+
+```csharp BaseDbContext.cs
+using Finbuckle.MultiTenant.EntityFrameworkCore;
+using FSH.Framework.Core.Domain;
+
+namespace FSH.Framework.Persistence.Context;
+
+public class BaseDbContext : MultiTenantDbContext
+{
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        // Apply global query filter for soft delete
+        modelBuilder.AppendGlobalQueryFilter<ISoftDeletable>(s => !s.IsDeleted);
+        base.OnModelCreating(modelBuilder);
+    }
+
+    public override async Task<int> SaveChangesAsync(CancellationToken ct = default)
+    {
+        TenantNotSetMode = TenantNotSetMode.Overwrite;
+        return await base.SaveChangesAsync(ct);
+    }
+}
+```
+
+### Specifications
+
+Specifications encapsulate query logic in reusable, testable objects.
+
+#### ISpecification&lt;T&gt;
+
+```csharp ISpecification.cs
+using System.Linq.Expressions;
+
+namespace FSH.Framework.Persistence;
+
+public interface ISpecification<T> where T : class
+{
+    Expression<Func<T, bool>>? Criteria { get; }
+    IReadOnlyList<Expression<Func<T, object>>> Includes { get; }
+    IReadOnlyList<string> IncludeStrings { get; }
+    IReadOnlyList<OrderExpression<T>> OrderExpressions { get; }
+    bool AsNoTracking { get; }
+    bool AsSplitQuery { get; }
+    bool IgnoreQueryFilters { get; }
+}
+```
+
+#### Specification&lt;T&gt;
+
+Base class with fluent API:
+
+```csharp Specification.cs
+namespace FSH.Framework.Persistence.Specifications;
+
+public abstract class Specification<T> : ISpecification<T>
+    where T : class
+{
+    protected Specification()
+    {
+        AsNoTracking = true; // Default: read-only queries
+    }
+
+    // Fluent API for building queries
+    protected void Where(Expression<Func<T, bool>> expression);
+    protected void Include(Expression<Func<T, object>> includeExpression);
+    protected void OrderBy(Expression<Func<T, object>> keySelector);
+    protected void OrderByDescending(Expression<Func<T, object>> keySelector);
+    protected void ThenBy(Expression<Func<T, object>> keySelector);
+    protected void AsNoTrackingQuery();
+    protected void AsTrackingQuery();
+    protected void AsSplitQueryBehavior();
+    protected void IgnoreQueryFiltersBehavior();
+}
+```
+
+#### Specification&lt;T, TResult&gt;
+
+Specification with projection (for DTOs):
+
+```csharp ISpecificationOfTResult.cs
+namespace FSH.Framework.Persistence;
+
+public interface ISpecification<T, TResult> : ISpecification<T>
+    where T : class
+{
+    Expression<Func<T, TResult>>? Selector { get; }
+}
+```
+
+### Database Configuration
+
+#### DatabaseOptions
+
+```csharp DatabaseOptions.cs
+namespace FSH.Framework.Shared.Persistence;
+
+public sealed class DatabaseOptions
+{
+    public string Provider { get; set; } = DbProviders.PostgreSQL;
+    public string ConnectionString { get; set; } = string.Empty;
+    public string? MigrationsAssembly { get; set; }
+}
+
+public static class DbProviders
+{
+    public const string PostgreSQL = "postgresql";
+    public const string MSSQL = "mssql";
+    public const string SQLite = "sqlite";
+}
+```
+
+### Extension Methods
+
+```csharp PersistenceExtensions.cs
+namespace FSH.Framework.Persistence;
+
+public static class PersistenceExtensions
+{
+    public static IServiceCollection AddHeroDatabaseOptions(
+        this IServiceCollection services,
+        IConfiguration configuration)
+    {
+        services.AddOptions<DatabaseOptions>()
+            .Bind(configuration.GetSection(nameof(DatabaseOptions)))
+            .ValidateDataAnnotations()
+            .ValidateOnStart();
+        return services;
+    }
+
+    public static IServiceCollection AddHeroDbContext<TContext>(
+        this IServiceCollection services)
+        where TContext : DbContext
+    {
+        services.AddDbContext<TContext>((sp, options) =>
+        {
+            var env = sp.GetRequiredService<IHostEnvironment>();
+            var dbConfig = sp.GetRequiredService<IOptions<DatabaseOptions>>().Value;
+            options.ConfigureHeroDatabase(
+                dbConfig.Provider,
+                dbConfig.ConnectionString,
+                dbConfig.MigrationsAssembly,
+                env.IsDevelopment());
+            options.AddInterceptors(sp.GetServices<ISaveChangesInterceptor>());
+        });
+        return services;
+    }
+}
+```
+
+## Usage Examples
+
+### Creating a Specification
+
+```csharp GetActiveProductsSpecification.cs
+using FSH.Framework.Persistence.Specifications;
+
+namespace MyModule.Persistence.Specifications;
+
+public sealed class GetActiveProductsSpecification : Specification<Product>
+{
+    public GetActiveProductsSpecification(string? searchTerm)
+    {
+        // Filter: active products only
+        Where(p => !p.IsDeleted);
+
+        // Optional search filter
+        if (!string.IsNullOrWhiteSpace(searchTerm))
+        {
+            Where(p => p.Name.Contains(searchTerm) || p.Description.Contains(searchTerm));
+        }
+
+        // Include related entities
+        Include(p => p.Category);
+        Include(p => p.Images);
+
+        // Default ordering
+        OrderByDescending(p => p.CreatedOnUtc);
+        ThenBy(p => p.Name);
+
+        // Read-only query (default)
+        AsNoTrackingQuery();
+    }
+}
+```
+
+### Specification with Projection
+
+```csharp GetTenantsSpecification.cs
+using FSH.Framework.Persistence.Specifications;
+
+namespace MyModule.Features.v1.GetTenants;
+
+public sealed class GetTenantsSpecification : Specification<AppTenantInfo, TenantDto>
+{
+    private static readonly IReadOnlyDictionary<string, Expression<Func<AppTenantInfo, object>>> SortMappings =
+        new Dictionary<string, Expression<Func<AppTenantInfo, object>>>(
+            StringComparer.OrdinalIgnoreCase)
+        {
+            ["id"] = t => t.Id!,
+            ["name"] = t => t.Name!,
+            ["isactive"] = t => t.IsActive
+        };
+
+    public GetTenantsSpecification(GetTenantsQuery query)
+    {
+        // Project to DTO
+        Select(t => new TenantDto
+        {
+            Id = t.Id!,
+            Name = t.Name!,
+            IsActive = t.IsActive
+        });
+
+        // Apply client-provided sorting or fallback to default
+        ApplySortingOverride(
+            query.Sort,
+            () =>
+            {
+                OrderBy(t => t.Name!);
+                ThenBy(t => t.Id!);
+            },
+            SortMappings);
+    }
+}
+```
+
+### Registering DbContext
+
+<CodeGroup>
+```csharp Module.cs (Service Registration)
+using FSH.Framework.Persistence;
+
+public void ConfigureServices(IHostApplicationBuilder builder)
+{
+    // Register your DbContext
+    builder.Services.AddHeroDbContext<CatalogDbContext>();
+
+    // Register repositories (scoped by default)
+    // Note: Repository interfaces are not in BuildingBlocks
+    // Implement them in your module if needed
+}
+```
+
+```csharp CatalogDbContext.cs (Custom DbContext)
+using FSH.Framework.Persistence.Context;
+using Microsoft.EntityFrameworkCore;
+
+namespace MyModule.Persistence;
+
+public sealed class CatalogDbContext : BaseDbContext
+{
+    public CatalogDbContext(
+        IMultiTenantContextAccessor<AppTenantInfo> multiTenantContextAccessor,
+        DbContextOptions<CatalogDbContext> options,
+        IOptions<DatabaseOptions> settings,
+        IHostEnvironment environment)
+        : base(multiTenantContextAccessor, options, settings, environment)
+    {
+    }
+
+    public DbSet<Product> Products => Set<Product>();
+    public DbSet<Category> Categories => Set<Category>();
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        modelBuilder.HasDefaultSchema("catalog");
+        modelBuilder.ApplyConfigurationsFromAssembly(typeof(CatalogDbContext).Assembly);
+        base.OnModelCreating(modelBuilder);
+    }
+}
+```
+
+```json appsettings.json (Configuration)
+{
+  "DatabaseOptions": {
+    "Provider": "postgresql",
+    "ConnectionString": "Host=localhost;Database=fsh;Username=postgres;Password=postgres",
+    "MigrationsAssembly": "FSH.Modules.Catalog"
+  }
+}
+```
+</CodeGroup>
+
+### Using Specifications in Handlers
+
+<Note>
+  The starter kit does NOT include `IRepository` interfaces in BuildingBlocks. You can implement repositories in your modules or use `DbContext` directly via specifications.
+</Note>
+
+```csharp GetProductsHandler.cs
+using FSH.Framework.Persistence.Pagination;
+using Mediator;
+
+public sealed class GetProductsHandler : IQueryHandler<GetProductsQuery, PagedResponse<ProductDto>>
+{
+    private readonly CatalogDbContext _db;
+
+    public GetProductsHandler(CatalogDbContext db) => _db = db;
+
+    public async ValueTask<PagedResponse<ProductDto>> Handle(
+        GetProductsQuery query,
+        CancellationToken ct)
+    {
+        var spec = new GetProductsSpecification(query);
+
+        var products = await _db.Products
+            .ApplySpecification(spec)
+            .ToPagedResponseAsync(query.PageNumber, query.PageSize, ct);
+
+        return products;
+    }
+}
+```
+
+### Entity Configuration
+
+```csharp ProductConfiguration.cs
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
+
+namespace MyModule.Persistence.Configurations;
+
+public sealed class ProductConfiguration : IEntityTypeConfiguration<Product>
+{
+    public void Configure(EntityTypeBuilder<Product> builder)
+    {
+        builder.ToTable("Products", "catalog");
+
+        builder.HasKey(p => p.Id);
+
+        builder.Property(p => p.Name)
+            .HasMaxLength(200)
+            .IsRequired();
+
+        builder.Property(p => p.Price)
+            .HasPrecision(18, 2);
+
+        // Shadow property for tenant isolation
+        builder.Property<string?>("TenantId").HasMaxLength(64);
+
+        // Navigation properties
+        builder.HasOne(p => p.Category)
+            .WithMany(c => c.Products)
+            .HasForeignKey(p => p.CategoryId);
+    }
+}
+```
+
+## Pagination Support
+
+```csharp PaginationExtensions.cs
+using FSH.Framework.Shared.Persistence;
+
+public static async Task<PagedResponse<T>> ToPagedResponseAsync<T>(
+    this IQueryable<T> query,
+    int pageNumber,
+    int pageSize,
+    CancellationToken ct = default)
+{
+    var totalCount = await query.CountAsync(ct);
+    var items = await query
+        .Skip((pageNumber - 1) * pageSize)
+        .Take(pageSize)
+        .ToListAsync(ct);
+
+    return new PagedResponse<T>(items, totalCount, pageNumber, pageSize);
+}
+```
+
+## Migrations
+
+<Steps>
+  <Step title="Add Migration">
+    ```bash
+    dotnet ef migrations add InitialCreate \
+      --project src/Modules/Catalog/Modules.Catalog \
+      --context CatalogDbContext
+    ```
+  </Step>
+  <Step title="Update Database">
+    ```bash
+    dotnet ef database update \
+      --project src/Modules/Catalog/Modules.Catalog \
+      --context CatalogDbContext
+    ```
+  </Step>
+  <Step title="Remove Last Migration">
+    ```bash
+    dotnet ef migrations remove \
+      --project src/Modules/Catalog/Modules.Catalog \
+      --context CatalogDbContext
+    ```
+  </Step>
+</Steps>
+
+## Best Practices
+
+<Steps>
+  <Step title="Use Specifications">
+    Encapsulate query logic in specifications for reusability and testability.
+  </Step>
+  <Step title="AsNoTracking by Default">
+    Use read-only queries (`AsNoTracking`) for all read operations. Only track entities when updating.
+  </Step>
+  <Step title="Project to DTOs">
+    Use `Specification<T, TResult>` to project entities to DTOs at the database level.
+  </Step>
+  <Step title="Avoid N+1 Queries">
+    Use `Include()` or `AsSplitQuery()` for eager loading related entities.
+  </Step>
+  <Step title="One DbContext per Module">
+    Each module should have its own `DbContext` and schema for isolation.
+  </Step>
+</Steps>
+
+## Advanced Features
+
+### Domain Events Interceptor
+
+```csharp DomainEventsInterceptor.cs
+using FSH.Framework.Core.Domain;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+
+public sealed class DomainEventsInterceptor : SaveChangesInterceptor
+{
+    private readonly IMediator _mediator;
+
+    public override async ValueTask<int> SavedChangesAsync(
+        SaveChangesCompletedEventData eventData,
+        int result,
+        CancellationToken ct = default)
+    {
+        if (eventData.Context is null) return result;
+
+        var events = eventData.Context.ChangeTracker
+            .Entries<IHasDomainEvents>()
+            .SelectMany(e => e.Entity.DomainEvents)
+            .ToList();
+
+        foreach (var @event in events)
+        {
+            await _mediator.Publish(@event, ct);
+        }
+
+        return result;
+    }
+}
+```
+
+### Soft Delete Global Filter
+
+```csharp ModelBuilderExtensions.cs
+using FSH.Framework.Core.Domain;
+using System.Linq.Expressions;
+
+public static void AppendGlobalQueryFilter<TInterface>(
+    this ModelBuilder modelBuilder,
+    Expression<Func<TInterface, bool>> filter)
+{
+    foreach (var entityType in modelBuilder.Model.GetEntityTypes())
+    {
+        if (!typeof(TInterface).IsAssignableFrom(entityType.ClrType))
+            continue;
+
+        var parameter = Expression.Parameter(entityType.ClrType, "e");
+        var body = ReplacingExpressionVisitor.Replace(
+            filter.Parameters[0], parameter, filter.Body);
+        var lambda = Expression.Lambda(body, parameter);
+
+        entityType.SetQueryFilter(lambda);
+    }
+}
+```
+
+## Package Reference
+
+```xml YourModule.csproj
+<ItemGroup>
+  <ProjectReference Include="..\..\BuildingBlocks\Persistence\FSH.Framework.Persistence.csproj" />
+  <PackageReference Include="Microsoft.EntityFrameworkCore" Version="9.0.*" />
+  <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="9.0.*" />
+</ItemGroup>
+```
+
+## Related Resources
+
+<CardGroup cols={2}>
+  <Card title="Core Primitives" icon="gem" href="/building-blocks/core">
+    Domain entities and aggregate roots
+  </Card>
+  <Card title="Query Patterns" icon="magnifying-glass" href="/architecture/cqrs-mediator">
+    Implement paginated and filtered queries
+  </Card>
+  <Card title="Migration Helper Agent" icon="database" href="/development/database-migrations">
+    Generate and apply EF Core migrations
+  </Card>
+  <Card title="EF Core Docs" icon="book" href="https://learn.microsoft.com/en-us/ef/core/">
+    Official Entity Framework Core documentation
+  </Card>
+</CardGroup>

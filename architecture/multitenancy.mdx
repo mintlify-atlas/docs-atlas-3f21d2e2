@@ -1,0 +1,533 @@
+---
+title: 'Multitenancy'
+description: 'Database-per-tenant architecture using Finbuckle.MultiTenant for complete data isolation'
+icon: 'building'
+---
+
+## Overview
+
+FullStackHero implements **database-per-tenant** multitenancy using [Finbuckle.MultiTenant](https://www.finbuckle.com/MultiTenant/). Each tenant gets:
+
+<CardGroup cols={2}>
+  <Card title="Isolated Database" icon="database">
+    Complete data separation with dedicated connection string
+  </Card>
+  <Card title="Custom Schema" icon="diagram-project">
+    Optional schema customization per tenant
+  </Card>
+  <Card title="Theme Support" icon="palette">
+    Per-tenant branding and styling
+  </Card>
+  <Card title="Provisioning Workflow" icon="gears">
+    Automated tenant setup with database migrations
+  </Card>
+</CardGroup>
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│               HTTP Request with tenant identifier             │
+│  Header: X-Tenant: acme-corp  OR  Claim: tenant=acme-corp    │
+└────────────────────────────┬────────────────────────────┘
+                            │
+                            ▼
+         ┌─────────────────────────────────┐
+         │    Finbuckle Tenant Resolution    │
+         │  (Header/Claim/Query Strategy)  │
+         └────────────────┬─────────────────┘
+                         │
+                         ▼
+         ┌─────────────────────────────────┐
+         │   TenantDbContext (Metadata)    │
+         │  • AppTenantInfo              │
+         │  • Connection strings          │
+         │  • Validity period            │
+         └────────────────┬─────────────────┘
+                         │
+         ┌─────────────┴─────────────────┐
+         ▼                               ▼
+┌────────────────┐        ┌────────────────┐
+│  Tenant A DB  │        │  Tenant B DB  │
+│  (acme-corp)  │        │  (globex-inc) │
+│                │        │                │
+│ • Users        │        │ • Users        │
+│ • Roles        │        │ • Roles        │
+│ • Orders       │        │ • Orders       │
+└────────────────┘        └────────────────┘
+```
+
+## Tenant Information Model
+
+### AppTenantInfo
+
+```csharp src/BuildingBlocks/Shared/Multitenancy/AppTenantInfo.cs
+using Finbuckle.MultiTenant.Abstractions;
+
+namespace FSH.Framework.Shared.Multitenancy;
+
+public class AppTenantInfo : TenantInfo, IAppTenantInfo
+{
+    public AppTenantInfo()
+    {
+        Id = string.Empty;
+        Identifier = string.Empty;
+    }
+
+    public AppTenantInfo(
+        string id, 
+        string name, 
+        string? connectionString, 
+        string adminEmail, 
+        string? issuer = null)
+        : this(id, id, name)
+    {
+        ConnectionString = connectionString ?? string.Empty;
+        AdminEmail = adminEmail;
+        IsActive = true;
+        Issuer = issuer;
+
+        // Default 1 month validity for new tenants
+        ValidUpto = DateTime.UtcNow.AddMonths(1);
+    }
+
+    public string ConnectionString { get; set; } = string.Empty;
+    public string AdminEmail { get; set; } = default!;
+    public bool IsActive { get; set; }
+    public DateTime ValidUpto { get; set; }
+    public string? Issuer { get; set; }
+
+    public void AddValidity(int months) =>
+        ValidUpto = ValidUpto.AddMonths(months);
+
+    public void SetValidity(in DateTime validTill)
+    {
+        if (ValidUpto >= validTill)
+            throw new InvalidOperationException("Subscription cannot be backdated.");
+        
+        ValidUpto = validTill;
+    }
+
+    public void Activate()
+    {
+        if (Id == MultitenancyConstants.Root.Id)
+            throw new InvalidOperationException("Invalid Tenant");
+
+        IsActive = true;
+    }
+
+    public void Deactivate()
+    {
+        if (Id == MultitenancyConstants.Root.Id)
+            throw new InvalidOperationException("Invalid Tenant");
+
+        IsActive = false;
+    }
+}
+```
+
+### Root Tenant
+
+There's always a special "root" tenant for system administration:
+
+```csharp src/BuildingBlocks/Shared/Multitenancy/MultitenancyConstants.cs
+namespace FSH.Framework.Shared.Multitenancy;
+
+public static class MultitenancyConstants
+{
+    public static class Root
+    {
+        public const string Id = "root";
+        public const string Name = "Root";
+        public const string EmailAddress = "admin@root.com";
+    }
+
+    public const string Identifier = "tenant";
+    public const string Schema = "tenant";
+}
+```
+
+<Note>
+  The root tenant is protected - it cannot be deactivated or deleted.
+</Note>
+
+## Tenant Resolution Strategies
+
+Finbuckle supports multiple strategies for identifying the current tenant:
+
+### 1. Header Strategy
+
+```http
+GET /api/v1/users
+X-Tenant: acme-corp
+```
+
+### 2. Claim Strategy
+
+Tenant identifier from JWT token:
+
+```json
+{
+  "sub": "user-123",
+  "tenant": "acme-corp",
+  "email": "john@acme-corp.com"
+}
+```
+
+### 3. Query String Strategy
+
+```http
+GET /api/v1/users?tenant=acme-corp
+```
+
+### Configuration
+
+```csharp src/Modules/Multitenancy/MultitenancyModule.cs
+public void ConfigureServices(IHostApplicationBuilder builder)
+{
+    builder.Services
+        .AddMultiTenant<AppTenantInfo>(options =>
+        {
+            // Event after tenant is resolved
+            options.Events.OnTenantResolveCompleted = async context =>
+            {
+                // Cache resolved tenant in distributed cache
+                if (context.MultiTenantContext.StoreInfo?.StoreType 
+                    != typeof(DistributedCacheStore<AppTenantInfo>))
+                {
+                    var sp = ((HttpContext)context.Context!).RequestServices;
+                    var distributedStore = sp
+                        .GetRequiredService<IEnumerable<IMultiTenantStore<AppTenantInfo>>>()
+                        .FirstOrDefault(s => s.GetType() 
+                            == typeof(DistributedCacheStore<AppTenantInfo>));
+
+                    await distributedStore!.AddAsync(
+                        context.MultiTenantContext.TenantInfo!);
+                }
+            };
+        })
+        .WithClaimStrategy(ClaimConstants.Tenant)
+        .WithHeaderStrategy(MultitenancyConstants.Identifier)
+        .WithDelegateStrategy(async context =>
+        {
+            if (context is not HttpContext httpContext) return null;
+
+            if (!httpContext.Request.Query.TryGetValue("tenant", out var tenantIdentifier) ||
+                string.IsNullOrEmpty(tenantIdentifier))
+                return null;
+
+            return await Task.FromResult(tenantIdentifier.ToString());
+        })
+        .WithDistributedCacheStore(TimeSpan.FromMinutes(60))
+        .WithStore<EFCoreStore<TenantDbContext, AppTenantInfo>>(ServiceLifetime.Scoped);
+}
+```
+
+<Note>
+  Strategies are tried in order. First match wins.
+</Note>
+
+## Multitenancy Module
+
+### Module Implementation
+
+```csharp src/Modules/Multitenancy/MultitenancyModule.cs
+using Finbuckle.MultiTenant.AspNetCore.Extensions;
+using FSH.Framework.Web.Modules;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.Hosting;
+
+namespace FSH.Modules.Multitenancy;
+
+public sealed class MultitenancyModule : IModule
+{
+    public void ConfigureServices(IHostApplicationBuilder builder)
+    {
+        builder.Services.AddScoped<ITenantService, TenantService>();
+        builder.Services.AddScoped<ITenantThemeService, TenantThemeService>();
+        builder.Services.AddScoped<ITenantProvisioningService, TenantProvisioningService>();
+        builder.Services.AddHostedService<TenantAutoProvisioningHostedService>();
+
+        // Register tenant metadata DbContext
+        builder.Services.AddHeroDbContext<TenantDbContext>();
+
+        // Configure Finbuckle MultiTenant (see above)
+        // ...
+
+        builder.Services.AddHealthChecks()
+            .AddDbContextCheck<TenantDbContext>(
+                name: "db:multitenancy",
+                failureStatus: HealthStatus.Unhealthy)
+            .AddCheck<TenantMigrationsHealthCheck>(
+                name: "db:tenants-migrations",
+                failureStatus: HealthStatus.Healthy);
+    }
+
+    public void MapEndpoints(IEndpointRouteBuilder endpoints)
+    {
+        var group = endpoints.MapGroup("api/v{version:apiVersion}/tenants")
+            .WithTags("Tenants")
+            .WithApiVersionSet(versionSet);
+        
+        ChangeTenantActivationEndpoint.Map(group);
+        GetTenantsEndpoint.Map(group);
+        UpgradeTenantEndpoint.Map(group);
+        CreateTenantEndpoint.Map(group);
+        GetTenantStatusEndpoint.Map(group);
+        GetTenantProvisioningStatusEndpoint.Map(group);
+        GetTenantThemeEndpoint.Map(group);
+        UpdateTenantThemeEndpoint.Map(group);
+    }
+}
+```
+
+### TenantDbContext
+
+Stores tenant metadata (not tenant data):
+
+```csharp src/Modules/Multitenancy/Data/TenantDbContext.cs
+using Finbuckle.MultiTenant.EntityFrameworkCore.Stores;
+using FSH.Framework.Shared.Multitenancy;
+using Microsoft.EntityFrameworkCore;
+
+namespace FSH.Modules.Multitenancy.Data;
+
+public class TenantDbContext : EFCoreStoreDbContext<AppTenantInfo>
+{
+    public const string Schema = "tenant";
+
+    public TenantDbContext(DbContextOptions<TenantDbContext> options)
+        : base(options)
+    {
+    }
+
+    public DbSet<TenantProvisioning> TenantProvisionings => Set<TenantProvisioning>();
+    public DbSet<TenantProvisioningStep> TenantProvisioningSteps => Set<TenantProvisioningStep>();
+    public DbSet<TenantTheme> TenantThemes => Set<TenantTheme>();
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        ArgumentNullException.ThrowIfNull(modelBuilder);
+
+        base.OnModelCreating(modelBuilder);
+        modelBuilder.ApplyConfigurationsFromAssembly(typeof(TenantDbContext).Assembly);
+    }
+}
+```
+
+<Warning>
+  `TenantDbContext` stores tenant **metadata**, not tenant data. Each tenant's data lives in its own database.
+</Warning>
+
+## Tenant Provisioning
+
+Creating a new tenant involves:
+
+<Steps>
+  <Step title="Create tenant record">
+    Insert `AppTenantInfo` into `TenantDbContext`
+  </Step>
+  <Step title="Create database">
+    Execute `CREATE DATABASE` on the target server
+  </Step>
+  <Step title="Run migrations">
+    Apply EF Core migrations to the new database
+  </Step>
+  <Step title="Seed initial data">
+    Create default admin user, roles, permissions
+  </Step>
+</Steps>
+
+### Provisioning Workflow
+
+```csharp Example Provisioning Logic
+public async Task<TenantProvisioningResult> ProvisionTenantAsync(
+    string tenantId,
+    string tenantName,
+    string adminEmail,
+    CancellationToken ct)
+{
+    // Step 1: Validate tenant doesn't exist
+    var exists = await _tenantDbContext.TenantInfo
+        .AnyAsync(t => t.Id == tenantId, ct);
+    if (exists)
+        throw new ConflictException($"Tenant '{tenantId}' already exists.");
+
+    // Step 2: Generate connection string
+    var connectionString = GenerateConnectionString(tenantId);
+
+    // Step 3: Create tenant metadata
+    var tenant = new AppTenantInfo(
+        id: tenantId,
+        name: tenantName,
+        connectionString: connectionString,
+        adminEmail: adminEmail);
+
+    _tenantDbContext.TenantInfo.Add(tenant);
+    await _tenantDbContext.SaveChangesAsync(ct);
+
+    // Step 4: Create database (async job)
+    await _jobClient.EnqueueAsync<TenantProvisioningJob>(
+        job => job.ExecuteAsync(tenantId, ct));
+
+    return new TenantProvisioningResult
+    {
+        TenantId = tenantId,
+        Status = ProvisioningStatus.Pending
+    };
+}
+```
+
+## Using Tenant Context
+
+### In Handlers
+
+```csharp
+public class CreateOrderCommandHandler : ICommandHandler<CreateOrderCommand, OrderDto>
+{
+    private readonly ICurrentUser _currentUser;
+    private readonly OrderDbContext _dbContext;
+
+    public async ValueTask<OrderDto> Handle(
+        CreateOrderCommand command, 
+        CancellationToken ct)
+    {
+        // Tenant is automatically set via query filter
+        var order = Order.Create(
+            customerId: _currentUser.GetUserId().ToString(),
+            items: command.Items);
+
+        _dbContext.Orders.Add(order);
+        await _dbContext.SaveChangesAsync(ct);
+
+        return MapToDto(order);
+    }
+}
+```
+
+### Automatic Tenant Filtering
+
+```csharp DbContext Configuration
+protected override void OnModelCreating(ModelBuilder modelBuilder)
+{
+    // Apply tenant filter to all IHasTenant entities
+    modelBuilder.Entity<Order>()
+        .HasQueryFilter(e => e.TenantId == _currentTenant.Id);
+}
+```
+
+### Explicit Tenant Access
+
+```csharp
+public class ReportService
+{
+    private readonly IMultiTenantContext<AppTenantInfo> _tenantContext;
+
+    public async Task<TenantReport> GenerateReportAsync()
+    {
+        var tenant = _tenantContext.TenantInfo;
+        
+        return new TenantReport
+        {
+            TenantId = tenant.Id,
+            TenantName = tenant.Name,
+            ConnectionString = tenant.ConnectionString,
+            IsActive = tenant.IsActive,
+            ValidUpto = tenant.ValidUpto
+        };
+    }
+}
+```
+
+## Tenant Themes
+
+Per-tenant branding:
+
+```csharp
+public class TenantTheme
+{
+    public string TenantId { get; set; } = default!;
+    public string? PrimaryColor { get; set; }
+    public string? SecondaryColor { get; set; }
+    public string? LogoUrl { get; set; }
+    public string? FaviconUrl { get; set; }
+    public string? CustomCss { get; set; }
+}
+```
+
+Themes are stored in `TenantDbContext` and loaded per request.
+
+## Security Considerations
+
+<CardGroup cols={2}>
+  <Card title="Connection String Security" icon="lock">
+    Store connection strings encrypted at rest
+  </Card>
+  <Card title="Tenant Validation" icon="shield-check">
+    Always validate tenant is active before processing requests
+  </Card>
+  <Card title="Tenant Isolation" icon="border-all">
+    Use query filters to prevent cross-tenant data access
+  </Card>
+  <Card title="Admin Segregation" icon="user-shield">
+    Root tenant admins can't access other tenant data
+  </Card>
+</CardGroup>
+
+## Testing with Tenants
+
+```csharp
+public class MultitenantTestBase
+{
+    protected AppTenantInfo CreateTestTenant(string id = "test-tenant")
+    {
+        return new AppTenantInfo(
+            id: id,
+            name: "Test Tenant",
+            connectionString: "Data Source=:memory:",
+            adminEmail: "admin@test-tenant.com");
+    }
+
+    protected IMultiTenantContext<AppTenantInfo> CreateTenantContext(
+        AppTenantInfo tenant)
+    {
+        var context = new Mock<IMultiTenantContext<AppTenantInfo>>();
+        context.Setup(x => x.TenantInfo).Returns(tenant);
+        return context.Object;
+    }
+}
+
+public class CreateOrderTests : MultitenantTestBase
+{
+    [Fact]
+    public async Task CreateOrder_WithTenant_SetsTenantId()
+    {
+        // Arrange
+        var tenant = CreateTestTenant("acme-corp");
+        var tenantContext = CreateTenantContext(tenant);
+        var handler = new CreateOrderCommandHandler(
+            CreateDbContext(tenant), 
+            tenantContext);
+
+        // Act
+        var result = await handler.Handle(
+            new CreateOrderCommand(items: [...]), 
+            CancellationToken.None);
+
+        // Assert
+        Assert.Equal("acme-corp", result.TenantId);
+    }
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Modular Monolith" href="/architecture/modular-monolith" icon="cube">
+    Learn how modules interact in a multi-tenant environment
+  </Card>
+  <Card title="Domain-Driven Design" href="/architecture/domain-driven-design" icon="diagram-project">
+    Understand tenant context in domain entities
+  </Card>
+</CardGroup>

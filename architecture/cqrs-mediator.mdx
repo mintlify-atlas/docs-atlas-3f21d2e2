@@ -1,0 +1,649 @@
+---
+title: 'CQRS & Mediator'
+description: 'Command Query Responsibility Segregation using the Mediator library for clean, testable request handling'
+icon: 'arrows-split-up-and-left'
+---
+
+## What is CQRS?
+
+**Command Query Responsibility Segregation (CQRS)** separates read operations (queries) from write operations (commands). This separation provides:
+
+<CardGroup cols={2}>
+  <Card title="Clear Intent" icon="bullseye">
+    Commands change state, queries don't. The type system enforces this.
+  </Card>
+  <Card title="Optimized Paths" icon="gauge-high">
+    Queries can bypass validation and use read-optimized projections.
+  </Card>
+  <Card title="Easy Testing" icon="flask">
+    Test commands and queries independently with focused unit tests.
+  </Card>
+  <Card title="Audit Trail" icon="list-check">
+    Commands represent business operations that can be logged and audited.
+  </Card>
+</CardGroup>
+
+## Mediator vs MediatR
+
+<Warning>
+  FullStackHero uses **Mediator** library (not MediatR). The interfaces and return types are different.
+</Warning>
+
+| Feature | Mediator | MediatR |
+|---------|----------|--------|
+| Command interface | `ICommand<T>` | `IRequest<T>` |
+| Query interface | `IQuery<T>` | `IRequest<T>` |
+| Handler return type | `ValueTask<T>` | `Task<T>` |
+| Package | `Mediator` | `MediatR` |
+| Performance | Faster (source generators) | Slower (reflection) |
+
+## Command Pattern
+
+Commands represent **write operations** that change application state.
+
+### Command Interface
+
+Commands implement `ICommand<TResponse>` from the Mediator library:
+
+```csharp Example Command
+using FSH.Modules.Identity.Contracts.DTOs;
+using Mediator;
+
+namespace FSH.Modules.Identity.Contracts.v1.Groups.CreateGroup;
+
+public sealed record CreateGroupCommand(
+    string Name,
+    string? Description,
+    bool IsDefault,
+    List<string>? RoleIds) : ICommand<GroupDto>;
+```
+
+<Note>
+  Commands are **records** for immutability. They should be serializable for audit logging and event sourcing.
+</Note>
+
+### Command Handler
+
+Handlers implement `ICommandHandler<TCommand, TResponse>`:
+
+```csharp Example Command Handler
+using FSH.Framework.Core.Context;
+using FSH.Framework.Core.Exceptions;
+using FSH.Modules.Identity.Contracts.DTOs;
+using FSH.Modules.Identity.Contracts.v1.Groups.CreateGroup;
+using FSH.Modules.Identity.Data;
+using FSH.Modules.Identity.Domain;
+using Mediator;
+using Microsoft.EntityFrameworkCore;
+
+namespace FSH.Modules.Identity.Features.v1.Groups.CreateGroup;
+
+public sealed class CreateGroupCommandHandler 
+    : ICommandHandler<CreateGroupCommand, GroupDto>
+{
+    private readonly IdentityDbContext _dbContext;
+    private readonly ICurrentUser _currentUser;
+
+    public CreateGroupCommandHandler(
+        IdentityDbContext dbContext, 
+        ICurrentUser currentUser)
+    {
+        _dbContext = dbContext;
+        _currentUser = currentUser;
+    }
+
+    public async ValueTask<GroupDto> Handle(
+        CreateGroupCommand command, 
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+
+        // Validate business rules
+        var nameExists = await _dbContext.Groups
+            .AnyAsync(g => g.Name == command.Name, cancellationToken);
+
+        if (nameExists)
+        {
+            throw new CustomException(
+                $"Group with name '{command.Name}' already exists.",
+                (IEnumerable<string>?)null,
+                System.Net.HttpStatusCode.Conflict);
+        }
+
+        // Create domain entity
+        var group = Group.Create(
+            name: command.Name,
+            description: command.Description,
+            isDefault: command.IsDefault,
+            isSystemGroup: false,
+            createdBy: _currentUser.GetUserId().ToString());
+
+        _dbContext.Groups.Add(group);
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        return new GroupDto
+        {
+            Id = group.Id,
+            Name = group.Name,
+            Description = group.Description,
+            IsDefault = group.IsDefault,
+            IsSystemGroup = group.IsSystemGroup,
+            MemberCount = 0,
+            CreatedAt = group.CreatedAt
+        };
+    }
+}
+```
+
+<Note>
+  Handlers return `ValueTask<T>` (not `Task<T>`) for better performance when operations complete synchronously.
+</Note>
+
+### Command Validation
+
+Every command must have a validator using FluentValidation:
+
+```csharp Example Validator
+using FluentValidation;
+using FSH.Modules.Identity.Contracts.v1.Groups.CreateGroup;
+
+namespace FSH.Modules.Identity.Features.v1.Groups.CreateGroup;
+
+public sealed class CreateGroupCommandValidator 
+    : AbstractValidator<CreateGroupCommand>
+{
+    public CreateGroupCommandValidator()
+    {
+        RuleFor(x => x.Name)
+            .NotEmpty().WithMessage("Group name is required.")
+            .MaximumLength(256).WithMessage("Group name must not exceed 256 characters.");
+
+        RuleFor(x => x.Description)
+            .MaximumLength(1024).WithMessage("Description must not exceed 1024 characters.");
+    }
+}
+```
+
+Validation runs automatically before the handler via a pipeline behavior.
+
+## Query Pattern
+
+Queries represent **read operations** that don't change state.
+
+### Query Interface
+
+Queries implement `IQuery<TResponse>`:
+
+```csharp Example Query
+using FSH.Modules.Identity.Contracts.DTOs;
+using Mediator;
+
+namespace FSH.Modules.Identity.Contracts.v1.Groups.GetGroupById;
+
+public sealed record GetGroupByIdQuery(Guid Id) : IQuery<GroupDto>;
+```
+
+### Query Handler
+
+Query handlers implement `IQueryHandler<TQuery, TResponse>`:
+
+```csharp Example Query Handler
+using FSH.Framework.Core.Exceptions;
+using FSH.Modules.Identity.Contracts.DTOs;
+using FSH.Modules.Identity.Contracts.v1.Groups.GetGroupById;
+using FSH.Modules.Identity.Data;
+using Mediator;
+using Microsoft.EntityFrameworkCore;
+
+namespace FSH.Modules.Identity.Features.v1.Groups.GetGroupById;
+
+public sealed class GetGroupByIdQueryHandler 
+    : IQueryHandler<GetGroupByIdQuery, GroupDto>
+{
+    private readonly IdentityDbContext _dbContext;
+
+    public GetGroupByIdQueryHandler(IdentityDbContext dbContext)
+    {
+        _dbContext = dbContext;
+    }
+
+    public async ValueTask<GroupDto> Handle(
+        GetGroupByIdQuery query, 
+        CancellationToken cancellationToken)
+    {
+        var group = await _dbContext.Groups
+            .Include(g => g.GroupRoles)
+            .FirstOrDefaultAsync(g => g.Id == query.Id, cancellationToken)
+            ?? throw new NotFoundException($"Group with ID '{query.Id}' not found.");
+
+        var memberCount = await _dbContext.UserGroups
+            .CountAsync(ug => ug.GroupId == group.Id, cancellationToken);
+
+        var roleIds = group.GroupRoles.Select(gr => gr.RoleId).ToList();
+        var roleNames = roleIds.Count > 0
+            ? await _dbContext.Roles
+                .Where(r => roleIds.Contains(r.Id))
+                .Select(r => r.Name!)
+                .ToListAsync(cancellationToken)
+            : [];
+
+        return new GroupDto
+        {
+            Id = group.Id,
+            Name = group.Name,
+            Description = group.Description,
+            IsDefault = group.IsDefault,
+            IsSystemGroup = group.IsSystemGroup,
+            MemberCount = memberCount,
+            RoleIds = roleIds.AsReadOnly(),
+            RoleNames = roleNames.AsReadOnly(),
+            CreatedAt = group.CreatedAt
+        };
+    }
+}
+```
+
+<Note>
+  Queries typically don't have validators since they're read-only. Add validation only if needed for security or performance.
+</Note>
+
+## Sending Commands and Queries
+
+Use `IMediator` to send commands and queries:
+
+### From an Endpoint
+
+```csharp Minimal API Endpoint
+public static class CreateGroupEndpoint
+{
+    public static RouteHandlerBuilder MapCreateGroupEndpoint(
+        this IEndpointRouteBuilder endpoints)
+    {
+        return endpoints.MapPost("/groups", 
+            async (IMediator mediator, 
+                   [FromBody] CreateGroupCommand request, 
+                   CancellationToken cancellationToken) =>
+            {
+                var result = await mediator.Send(request, cancellationToken);
+                return Results.Ok(result);
+            })
+        .WithName("CreateGroup")
+        .WithSummary("Create a new group")
+        .RequirePermission(IdentityPermissionConstants.Groups.Create);
+    }
+}
+```
+
+### From a Service
+
+```csharp Service Calling Command
+public class TenantProvisioningService
+{
+    private readonly IMediator _mediator;
+
+    public TenantProvisioningService(IMediator mediator)
+    {
+        _mediator = mediator;
+    }
+
+    public async Task ProvisionTenant(string tenantId)
+    {
+        // Create default admin group
+        var group = await _mediator.Send(
+            new CreateGroupCommand("Admins", "Administrator group", true, null));
+
+        // Query the group to verify
+        var result = await _mediator.Send(
+            new GetGroupByIdQuery(group.Id));
+    }
+}
+```
+
+## Mediator Registration
+
+Mediator must be registered with assemblies containing handlers:
+
+```csharp Program.cs
+builder.Services.AddMediator(o =>
+{
+    o.ServiceLifetime = ServiceLifetime.Scoped;
+    o.Assemblies = [
+        typeof(GenerateTokenCommand),           // Contract assembly
+        typeof(GenerateTokenCommandHandler),    // Handler assembly
+        typeof(GetTenantStatusQuery),
+        typeof(GetTenantStatusQueryHandler),
+        typeof(AuditEnvelope),
+        typeof(AuditDbContext)
+    ];
+});
+```
+
+<Warning>
+  You must register **both** the contract assemblies (containing commands/queries) and implementation assemblies (containing handlers).
+</Warning>
+
+## Validation Pipeline Behavior
+
+Validation happens automatically via a pipeline behavior:
+
+```csharp src/BuildingBlocks/Web/Mediator/Behaviors/ValidationBehavior.cs
+using FluentValidation;
+using Mediator;
+
+public class ValidationBehavior<TMessage, TResponse> 
+    : IPipelineBehavior<TMessage, TResponse>
+    where TMessage : IMessage
+{
+    private readonly IEnumerable<IValidator<TMessage>> _validators;
+
+    public ValidationBehavior(IEnumerable<IValidator<TMessage>> validators)
+    {
+        _validators = validators;
+    }
+
+    public async ValueTask<TResponse> Handle(
+        TMessage message,
+        CancellationToken cancellationToken,
+        MessageHandlerDelegate<TMessage, TResponse> next)
+    {
+        if (_validators.Any())
+        {
+            var context = new ValidationContext<TMessage>(message);
+            
+            var validationResults = await Task.WhenAll(
+                _validators.Select(v => 
+                    v.ValidateAsync(context, cancellationToken)));
+
+            var failures = validationResults
+                .SelectMany(r => r.Errors)
+                .Where(f => f != null)
+                .ToList();
+
+            if (failures.Count != 0)
+            {
+                throw new ValidationException(failures);
+            }
+        }
+
+        return await next(message, cancellationToken);
+    }
+}
+```
+
+Registration:
+
+```csharp Extension Registration
+builder.Services.AddTransient(
+    typeof(IPipelineBehavior<,>), 
+    typeof(ValidationBehavior<,>));
+```
+
+## Request Flow
+
+<Steps>
+  <Step title="Client sends HTTP request">
+    `POST /api/v1/identity/groups` with JSON body
+  </Step>
+  <Step title="Model binding">
+    ASP.NET Core deserializes JSON to `CreateGroupCommand`
+  </Step>
+  <Step title="Authorization">
+    `.RequirePermission()` checks user permissions
+  </Step>
+  <Step title="Mediator.Send()">
+    Endpoint calls `await mediator.Send(command, ct)`
+  </Step>
+  <Step title="Validation pipeline">
+    `ValidationBehavior` runs `CreateGroupCommandValidator`
+  </Step>
+  <Step title="Handler execution">
+    `CreateGroupCommandHandler.Handle()` executes business logic
+  </Step>
+  <Step title="Response">
+    Handler returns `GroupDto` serialized to JSON
+  </Step>
+</Steps>
+
+## Command vs Query Decision Tree
+
+```
+Does this operation change state?
+├── YES → Use ICommand<T>
+│   ├── Creates data? → CreateXCommand
+│   ├── Updates data? → UpdateXCommand
+│   ├── Deletes data? → DeleteXCommand
+│   └── Creates OR updates? → UpsertXCommand
+└── NO → Use IQuery<T>
+    ├── Single entity? → GetXByIdQuery
+    ├── List of entities? → GetXListQuery
+    └── Filtered/paginated? → SearchXQuery
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Immutable Commands" icon="lock">
+    Use `record` types for commands and queries. Never mutate them after creation.
+  </Card>
+  <Card title="Single Responsibility" icon="bullseye">
+    One handler per command/query. Don't create generic handlers.
+  </Card>
+  <Card title="Validation Required" icon="circle-check">
+    Every command must have a validator. Queries only if needed.
+  </Card>
+  <Card title="Return DTOs" icon="arrow-right-from-bracket">
+    Never return domain entities directly. Always use DTOs.
+  </Card>
+</CardGroup>
+
+### Command Naming
+
+```csharp
+// ✅ Good
+CreateGroupCommand
+UpdateGroupCommand
+DeleteGroupCommand
+AssignUserRolesCommand
+
+// ❌ Bad
+GroupCommand          // Too vague
+AddGroupCommand       // Use "Create" not "Add"
+ModifyGroupCommand    // Use "Update" not "Modify"
+```
+
+### Query Naming
+
+```csharp
+// ✅ Good
+GetGroupByIdQuery
+GetGroupsQuery
+SearchUsersQuery
+GetUserPermissionsQuery
+
+// ❌ Bad
+GroupQuery            // Too vague
+FetchGroupQuery       // Use "Get" not "Fetch"
+RetrieveGroupQuery    // Use "Get" not "Retrieve"
+```
+
+## Testing Commands and Queries
+
+### Unit Testing a Command Handler
+
+```csharp
+public class CreateGroupCommandHandlerTests
+{
+    [Fact]
+    public async Task Handle_ValidCommand_CreatesGroup()
+    {
+        // Arrange
+        var dbContext = CreateInMemoryDbContext();
+        var currentUser = CreateMockCurrentUser();
+        var handler = new CreateGroupCommandHandler(dbContext, currentUser);
+        
+        var command = new CreateGroupCommand(
+            "Admins", 
+            "Administrator group", 
+            false, 
+            null);
+
+        // Act
+        var result = await handler.Handle(command, CancellationToken.None);
+
+        // Assert
+        Assert.NotNull(result);
+        Assert.Equal("Admins", result.Name);
+        Assert.Equal("Administrator group", result.Description);
+    }
+
+    [Fact]
+    public async Task Handle_DuplicateName_ThrowsCustomException()
+    {
+        // Arrange
+        var dbContext = CreateInMemoryDbContext();
+        await dbContext.Groups.AddAsync(
+            Group.Create("Admins", null, false, false, null));
+        await dbContext.SaveChangesAsync();
+
+        var handler = new CreateGroupCommandHandler(
+            dbContext, 
+            CreateMockCurrentUser());
+        
+        var command = new CreateGroupCommand(
+            "Admins",  // Duplicate
+            "Another admin group", 
+            false, 
+            null);
+
+        // Act & Assert
+        await Assert.ThrowsAsync<CustomException>(
+            () => handler.Handle(command, CancellationToken.None));
+    }
+}
+```
+
+### Testing Validators
+
+```csharp
+public class CreateGroupCommandValidatorTests
+{
+    private readonly CreateGroupCommandValidator _validator = new();
+
+    [Fact]
+    public async Task Validate_EmptyName_ReturnsError()
+    {
+        // Arrange
+        var command = new CreateGroupCommand("", null, false, null);
+
+        // Act
+        var result = await _validator.ValidateAsync(command);
+
+        // Assert
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, 
+            e => e.PropertyName == nameof(CreateGroupCommand.Name));
+    }
+
+    [Fact]
+    public async Task Validate_ValidCommand_ReturnsSuccess()
+    {
+        // Arrange
+        var command = new CreateGroupCommand(
+            "Admins", 
+            "Administrator group", 
+            false, 
+            null);
+
+        // Act
+        var result = await _validator.ValidateAsync(command);
+
+        // Assert
+        Assert.True(result.IsValid);
+    }
+}
+```
+
+## Advanced Patterns
+
+### Commands with Side Effects
+
+```csharp
+public async ValueTask<GroupDto> Handle(
+    CreateGroupCommand command, 
+    CancellationToken cancellationToken)
+{
+    var group = Group.Create(
+        command.Name, 
+        command.Description, 
+        command.IsDefault, 
+        false, 
+        _currentUser.GetUserId().ToString());
+
+    // Raise domain event for other modules
+    group.AddDomainEvent(GroupCreatedEvent.Create(
+        group.Id, 
+        group.Name, 
+        _currentUser.GetUserId().ToString()));
+
+    _dbContext.Groups.Add(group);
+    await _dbContext.SaveChangesAsync(cancellationToken);
+
+    // Domain events are dispatched automatically after SaveChanges
+
+    return MapToDto(group);
+}
+```
+
+### Queries with Pagination
+
+```csharp
+public sealed record SearchGroupsQuery(
+    string? SearchTerm,
+    int PageNumber,
+    int PageSize) : IQuery<PaginatedResult<GroupDto>>;
+
+public sealed class SearchGroupsQueryHandler 
+    : IQueryHandler<SearchGroupsQuery, PaginatedResult<GroupDto>>
+{
+    public async ValueTask<PaginatedResult<GroupDto>> Handle(
+        SearchGroupsQuery query, 
+        CancellationToken cancellationToken)
+    {
+        var queryable = _dbContext.Groups.AsQueryable();
+
+        if (!string.IsNullOrWhiteSpace(query.SearchTerm))
+        {
+            queryable = queryable.Where(g => 
+                g.Name.Contains(query.SearchTerm) || 
+                g.Description!.Contains(query.SearchTerm));
+        }
+
+        var totalCount = await queryable.CountAsync(cancellationToken);
+
+        var items = await queryable
+            .Skip((query.PageNumber - 1) * query.PageSize)
+            .Take(query.PageSize)
+            .Select(g => new GroupDto { /* ... */ })
+            .ToListAsync(cancellationToken);
+
+        return new PaginatedResult<GroupDto>
+        {
+            Items = items,
+            TotalCount = totalCount,
+            PageNumber = query.PageNumber,
+            PageSize = query.PageSize
+        };
+    }
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Domain-Driven Design" href="/architecture/domain-driven-design" icon="diagram-project">
+    Learn about entities, aggregates, and domain events
+  </Card>
+  <Card title="Vertical Slices" href="/architecture/vertical-slices" icon="layer-group">
+    See how commands/queries fit into feature folders
+  </Card>
+</CardGroup>

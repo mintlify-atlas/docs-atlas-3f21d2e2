@@ -1,0 +1,276 @@
+---
+title: Tenant Status
+description: Check tenant status and manage tenant activation
+---
+
+## Get Tenant Status
+
+Retrieve status information for a specific tenant.
+
+<CodeGroup>
+```http GET /api/v1/tenants/{id}/status
+GET /api/v1/tenants/acme-corp/status
+```
+
+```bash cURL
+curl -X GET 'https://api.example.com/api/v1/tenants/acme-corp/status' \
+  -H 'Authorization: Bearer {token}'
+```
+
+```csharp C#
+var query = new GetTenantStatusQuery("acme-corp");
+var status = await mediator.Send(query, cancellationToken);
+```
+</CodeGroup>
+
+### Path Parameters
+
+<ParamField path="id" type="string" required>
+  Tenant identifier
+</ParamField>
+
+### Authorization
+
+Requires `Permissions.Multitenancy.View` permission.
+
+### Response
+
+<ResponseField name="id" type="string">
+  Tenant identifier
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  Tenant display name
+</ResponseField>
+
+<ResponseField name="isActive" type="boolean">
+  Whether the tenant is currently active
+</ResponseField>
+
+<ResponseField name="validUpto" type="datetime">
+  Subscription expiration date
+</ResponseField>
+
+<ResponseField name="hasConnectionString" type="boolean">
+  Whether tenant has a custom database connection
+</ResponseField>
+
+<ResponseField name="adminEmail" type="string">
+  Administrator email address
+</ResponseField>
+
+<ResponseField name="issuer" type="string" nullable>
+  JWT issuer for the tenant
+</ResponseField>
+
+<ResponseExample>
+```json 200 Success
+{
+  "id": "acme-corp",
+  "name": "Acme Corporation",
+  "isActive": true,
+  "validUpto": "2026-06-30T23:59:59Z",
+  "hasConnectionString": true,
+  "adminEmail": "admin@acme.com",
+  "issuer": "https://acme.example.com"
+}
+```
+
+```json 404 Not Found
+{
+  "title": "Tenant not found",
+  "status": 404,
+  "detail": "Tenant with ID 'acme-corp' does not exist"
+}
+```
+</ResponseExample>
+
+---
+
+## Change Tenant Activation
+
+Activate or deactivate a tenant.
+
+<CodeGroup>
+```http POST /api/v1/tenants/{id}/activation
+POST /api/v1/tenants/acme-corp/activation
+Content-Type: application/json
+
+{
+  "tenantId": "acme-corp",
+  "isActive": false
+}
+```
+
+```bash cURL
+curl -X POST 'https://api.example.com/api/v1/tenants/acme-corp/activation' \
+  -H 'Authorization: Bearer {token}' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "tenantId": "acme-corp",
+    "isActive": false
+  }'
+```
+
+```csharp C#
+var command = new ChangeTenantActivationCommand(
+    TenantId: "acme-corp",
+    IsActive: false
+);
+var result = await mediator.Send(command, cancellationToken);
+```
+</CodeGroup>
+
+### Path Parameters
+
+<ParamField path="id" type="string" required>
+  Tenant identifier (must match the tenantId in request body)
+</ParamField>
+
+### Request Body
+
+<ParamField body="tenantId" type="string" required>
+  Tenant identifier (must match path parameter)
+</ParamField>
+
+<ParamField body="isActive" type="boolean" required>
+  Set to `true` to activate, `false` to deactivate
+</ParamField>
+
+### Authorization
+
+Requires `Permissions.Multitenancy.Update` permission.
+
+### Response
+
+<ResponseField name="tenantId" type="string">
+  The tenant identifier
+</ResponseField>
+
+<ResponseField name="isActive" type="boolean">
+  New activation status
+</ResponseField>
+
+<ResponseField name="validUpto" type="datetime" nullable>
+  Subscription validity date
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  Descriptive message about the status change
+</ResponseField>
+
+<ResponseExample>
+```json 200 Success
+{
+  "tenantId": "acme-corp",
+  "isActive": false,
+  "validUpto": "2026-06-30T23:59:59Z",
+  "message": "Tenant has been deactivated successfully"
+}
+```
+
+```json 400 Bad Request
+{
+  "title": "Validation Error",
+  "status": 400,
+  "detail": "Tenant ID in path does not match request body"
+}
+```
+
+```json 404 Not Found
+{
+  "title": "Tenant not found",
+  "status": 404,
+  "detail": "Tenant with ID 'acme-corp' does not exist"
+}
+```
+</ResponseExample>
+
+<Warning>
+  Deactivating a tenant will prevent all users from that tenant from accessing the system.
+</Warning>
+
+---
+
+## Upgrade Tenant Subscription
+
+Extend or upgrade a tenant's subscription.
+
+<CodeGroup>
+```http POST /api/v1/tenants/{id}/upgrade
+POST /api/v1/tenants/acme-corp/upgrade
+Content-Type: application/json
+
+{
+  "tenant": "acme-corp",
+  "extendedExpiryDate": "2027-12-31T23:59:59Z"
+}
+```
+
+```bash cURL
+curl -X POST 'https://api.example.com/api/v1/tenants/acme-corp/upgrade' \
+  -H 'Authorization: Bearer {token}' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "tenant": "acme-corp",
+    "extendedExpiryDate": "2027-12-31T23:59:59Z"
+  }'
+```
+
+```csharp C#
+var command = new UpgradeTenantCommand(
+    Tenant: "acme-corp",
+    ExtendedExpiryDate: new DateTime(2027, 12, 31, 23, 59, 59, DateTimeKind.Utc)
+);
+var response = await mediator.Send(command, cancellationToken);
+```
+</CodeGroup>
+
+### Path Parameters
+
+<ParamField path="id" type="string" required>
+  Tenant identifier (must match the tenant in request body)
+</ParamField>
+
+### Request Body
+
+<ParamField body="tenant" type="string" required>
+  Tenant identifier (must match path parameter)
+</ParamField>
+
+<ParamField body="extendedExpiryDate" type="datetime" required>
+  New subscription expiration date (must be in the future)
+</ParamField>
+
+### Authorization
+
+Requires `Permissions.Multitenancy.Update` permission.
+
+### Response
+
+<ResponseField name="tenant" type="string">
+  The tenant identifier
+</ResponseField>
+
+<ResponseField name="newValidity" type="datetime">
+  Updated subscription expiration date
+</ResponseField>
+
+<ResponseExample>
+```json 200 Success
+{
+  "tenant": "acme-corp",
+  "newValidity": "2027-12-31T23:59:59Z"
+}
+```
+
+```json 400 Bad Request
+{
+  "title": "Validation Error",
+  "status": 400,
+  "errors": {
+    "ExtendedExpiryDate": ["Date must be in the future"]
+  }
+}
+```
+</ResponseExample>

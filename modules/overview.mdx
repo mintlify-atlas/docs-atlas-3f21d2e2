@@ -1,0 +1,205 @@
+---
+title: 'Modules Overview'
+description: 'Understanding the modular architecture of FullStackHero'
+icon: 'cube'
+---
+
+## What are Modules?
+
+Modules are self-contained, vertically-sliced bounded contexts that encapsulate specific business capabilities. Each module owns its:
+
+- **Domain models** and business logic
+- **Database schema** via dedicated DbContext
+- **HTTP endpoints** using Minimal APIs
+- **Dependency injection** registration
+- **Health checks** and initialization
+
+This modular monolith pattern provides microservice-like isolation while maintaining deployment simplicity.
+
+## The IModule Interface
+
+Every module implements the `IModule` interface, which defines two core responsibilities:
+
+```csharp
+namespace FSH.Framework.Web.Modules;
+
+public interface IModule
+{
+    // DI/Options/Health/etc. — don't depend on ASP.NET types here
+    void ConfigureServices(IHostApplicationBuilder builder);
+
+    // HTTP wiring — Minimal APIs only
+    void MapEndpoints(IEndpointRouteBuilder endpoints);
+}
+```
+
+### ConfigureServices
+
+Registers all module dependencies, including:
+
+- Services and repositories
+- DbContext with connection pooling
+- Health checks
+- Options configuration
+- Background workers
+- Event handlers
+
+<Note>
+  Services registered here should not depend on ASP.NET Core HTTP types. Keep this layer focused on application infrastructure.
+</Note>
+
+### MapEndpoints
+
+Configures HTTP routing using Minimal APIs:
+
+- API versioning
+- Route groups with base paths
+- Individual endpoints with authorization
+- Rate limiting
+
+## Module Registration
+
+Modules are automatically discovered and loaded using assembly-level attributes:
+
+```csharp
+// In AssemblyInfo.cs
+[assembly: FshModule(typeof(IdentityModule), order: 100)]
+[assembly: FshModule(typeof(MultitenancyModule), order: 200)]
+[assembly: FshModule(typeof(AuditingModule), order: 300)]
+```
+
+The `order` parameter controls initialization sequence:
+- Lower numbers execute first
+- Identity (100) loads before Multitenancy (200)
+- Critical infrastructure modules load early
+
+## Loading Modules
+
+The `ModuleLoader` discovers and initializes modules from assemblies:
+
+```csharp
+using FSH.Framework.Web.Modules;
+using FSH.Modules.Identity;
+using FSH.Modules.Multitenancy;
+using FSH.Modules.Auditing;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Specify module assemblies
+var moduleAssemblies = new Assembly[]
+{
+    typeof(IdentityModule).Assembly,
+    typeof(MultitenancyModule).Assembly,
+    typeof(AuditingModule).Assembly
+};
+
+// Register module services
+builder.AddModules(moduleAssemblies);
+
+var app = builder.Build();
+
+// Map module endpoints
+app.UseHeroPlatform(p =>
+{
+    p.MapModules = true;
+});
+```
+
+## Module Lifecycle
+
+<Steps>
+  <Step title="Discovery">
+    The `ModuleLoader` scans assemblies for `FshModuleAttribute` declarations and instantiates module classes.
+  </Step>
+  
+  <Step title="Service Configuration">
+    Each module's `ConfigureServices` method is called in order, registering dependencies with the DI container.
+  </Step>
+  
+  <Step title="Validation Registration">
+    FluentValidation validators are automatically discovered from module assemblies.
+  </Step>
+  
+  <Step title="Endpoint Mapping">
+    After the app is built, `MapEndpoints` is called for each module to wire up HTTP routes.
+  </Step>
+</Steps>
+
+## Built-in Modules
+
+FullStackHero includes three core modules:
+
+<CardGroup cols={3}>
+  <Card title="Identity" icon="user-shield" href="/modules/identity">
+    Authentication, authorization, users, roles, permissions, and sessions
+  </Card>
+  
+  <Card title="Multitenancy" icon="building" href="/modules/multitenancy">
+    Tenant provisioning, isolation, and management with database per tenant
+  </Card>
+  
+  <Card title="Auditing" icon="clipboard-list" href="/modules/auditing">
+    Security audits, activity logging, and exception tracking
+  </Card>
+</CardGroup>
+
+## Module Isolation
+
+Modules maintain clear boundaries:
+
+| Aspect | Approach |
+|--------|----------|
+| **Database** | Separate DbContext per module |
+| **Contracts** | Shared via `*.Contracts` projects |
+| **Events** | Integration events for cross-module communication |
+| **Dependencies** | Modules don't directly reference each other |
+| **Endpoints** | Prefixed with module name (e.g., `/api/v1/identity/*`) |
+
+<Warning>
+  Avoid tight coupling between modules. Use integration events or contracts for inter-module communication.
+</Warning>
+
+## Module Structure
+
+A typical module follows this organization:
+
+```
+Modules.{ModuleName}/
+├── AssemblyInfo.cs              # [FshModule] attribute
+├── {ModuleName}Module.cs        # IModule implementation
+├── Domain/                      # Entities, value objects
+├── Data/                        # DbContext, configurations
+├── Features/v1/                 # Vertical slices (CQRS)
+│   └── {Feature}/
+│       ├── {Action}Command.cs
+│       ├── {Action}Handler.cs
+│       ├── {Action}Validator.cs
+│       └── {Action}Endpoint.cs
+├── Contracts/                   # DTOs, interfaces for external use
+└── Services/                    # Domain services
+```
+
+## Health Checks
+
+Modules register health checks during `ConfigureServices`:
+
+```csharp
+builder.Services.AddHealthChecks()
+    .AddDbContextCheck<IdentityDbContext>(
+        name: "db:identity",
+        failureStatus: HealthStatus.Unhealthy);
+```
+
+Access health status at `/health` endpoint.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Create Custom Module" icon="plus" href="/modules/creating-modules">
+    Learn how to build your own modules from scratch
+  </Card>
+  
+  <Card title="Identity Module" icon="user" href="/modules/identity">
+    Explore authentication and authorization features
+  </Card>
+</CardGroup>

@@ -1,0 +1,551 @@
+---
+title: 'Vertical Slices'
+description: 'Feature-first organization using vertical slices instead of horizontal layers'
+icon: 'layer-group'
+---
+
+## What are Vertical Slices?
+
+Vertical slice architecture organizes code by **features** rather than technical layers. Each feature is a self-contained vertical slice that includes all the code needed to implement that feature.
+
+### Traditional Layers vs Vertical Slices
+
+<CardGroup cols={2}>
+  <Card title="❌ Horizontal Layers" icon="layer-group">
+    ```
+    Controllers/
+      UserController.cs
+      GroupController.cs
+    Services/
+      UserService.cs
+      GroupService.cs
+    Repositories/
+      UserRepository.cs
+      GroupRepository.cs
+    ```
+    
+    Code for one feature is scattered across multiple folders.
+  </Card>
+  
+  <Card title="✅ Vertical Slices" icon="diagram-project">
+    ```
+    Features/
+      CreateUser/
+        Command.cs
+        Handler.cs
+        Validator.cs
+        Endpoint.cs
+      CreateGroup/
+        Command.cs
+        Handler.cs
+        Validator.cs
+        Endpoint.cs
+    ```
+    
+    Everything for one feature lives in one folder.
+  </Card>
+</CardGroup>
+
+## Feature Folder Structure
+
+Every feature follows this consistent pattern:
+
+```
+Modules/Identity/Features/v1/Groups/CreateGroup/
+├── CreateGroupCommandHandler.cs    ← Business logic
+├── CreateGroupCommandValidator.cs  ← Validation rules
+└── CreateGroupEndpoint.cs          ← HTTP endpoint mapping
+
+Modules.Identity.Contracts/v1/Groups/CreateGroup/
+└── CreateGroupCommand.cs           ← Contract (ICommand<GroupDto>)
+```
+
+<Steps>
+  <Step title="Command/Query Contract">
+    Defines the request shape and return type. Lives in `.Contracts` project.
+  </Step>
+  <Step title="Handler">
+    Contains all business logic. Lives in `.Features` folder.
+  </Step>
+  <Step title="Validator">
+    FluentValidation rules. Lives alongside the handler.
+  </Step>
+  <Step title="Endpoint">
+    HTTP mapping using Minimal APIs. Lives alongside the handler.
+  </Step>
+</Steps>
+
+## Real Example: CreateGroup Feature
+
+Let's walk through a complete feature implementation from the Identity module.
+
+### 1. Command Contract
+
+```csharp Modules.Identity.Contracts/v1/Groups/CreateGroup/CreateGroupCommand.cs
+using FSH.Modules.Identity.Contracts.DTOs;
+using Mediator;
+
+namespace FSH.Modules.Identity.Contracts.v1.Groups.CreateGroup;
+
+public sealed record CreateGroupCommand(
+    string Name,
+    string? Description,
+    bool IsDefault,
+    List<string>? RoleIds) : ICommand<GroupDto>;
+```
+
+<Note>
+  The command is a **record** for immutability. It implements `ICommand<GroupDto>` from the Mediator library (not MediatR).
+</Note>
+
+### 2. Command Handler
+
+```csharp Modules.Identity/Features/v1/Groups/CreateGroup/CreateGroupCommandHandler.cs
+using FSH.Framework.Core.Context;
+using FSH.Framework.Core.Exceptions;
+using FSH.Modules.Identity.Contracts.DTOs;
+using FSH.Modules.Identity.Contracts.v1.Groups.CreateGroup;
+using FSH.Modules.Identity.Data;
+using FSH.Modules.Identity.Domain;
+using Mediator;
+using Microsoft.EntityFrameworkCore;
+
+namespace FSH.Modules.Identity.Features.v1.Groups.CreateGroup;
+
+public sealed class CreateGroupCommandHandler : ICommandHandler<CreateGroupCommand, GroupDto>
+{
+    private readonly IdentityDbContext _dbContext;
+    private readonly ICurrentUser _currentUser;
+
+    public CreateGroupCommandHandler(IdentityDbContext dbContext, ICurrentUser currentUser)
+    {
+        _dbContext = dbContext;
+        _currentUser = currentUser;
+    }
+
+    public async ValueTask<GroupDto> Handle(CreateGroupCommand command, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+
+        // Validate name is unique within tenant
+        var nameExists = await _dbContext.Groups
+            .AnyAsync(g => g.Name == command.Name, cancellationToken);
+
+        if (nameExists)
+        {
+            throw new CustomException(
+                $"Group with name '{command.Name}' already exists.", 
+                (IEnumerable<string>?)null, 
+                System.Net.HttpStatusCode.Conflict);
+        }
+
+        // Validate role IDs exist
+        if (command.RoleIds is { Count: > 0 })
+        {
+            var existingRoleIds = await _dbContext.Roles
+                .Where(r => command.RoleIds.Contains(r.Id))
+                .Select(r => r.Id)
+                .ToListAsync(cancellationToken);
+
+            var invalidRoleIds = command.RoleIds.Except(existingRoleIds).ToList();
+            if (invalidRoleIds.Count > 0)
+            {
+                throw new NotFoundException(
+                    $"Roles not found: {string.Join(", ", invalidRoleIds)}");
+            }
+        }
+
+        // Create domain entity using factory method
+        var group = Group.Create(
+            name: command.Name,
+            description: command.Description,
+            isDefault: command.IsDefault,
+            isSystemGroup: false,
+            createdBy: _currentUser.GetUserId().ToString());
+
+        // Add role assignments
+        if (command.RoleIds is { Count: > 0 })
+        {
+            foreach (var roleId in command.RoleIds)
+            {
+                _dbContext.GroupRoles.Add(GroupRole.Create(group.Id, roleId));
+            }
+        }
+
+        _dbContext.Groups.Add(group);
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        // Get role names for response
+        var roleNames = command.RoleIds is { Count: > 0 }
+            ? await _dbContext.Roles
+                .Where(r => command.RoleIds.Contains(r.Id))
+                .Select(r => r.Name!)
+                .ToListAsync(cancellationToken)
+            : [];
+
+        return new GroupDto
+        {
+            Id = group.Id,
+            Name = group.Name,
+            Description = group.Description,
+            IsDefault = group.IsDefault,
+            IsSystemGroup = group.IsSystemGroup,
+            MemberCount = 0,
+            RoleIds = command.RoleIds?.AsReadOnly(),
+            RoleNames = roleNames.AsReadOnly(),
+            CreatedAt = group.CreatedAt
+        };
+    }
+}
+```
+
+<Note>
+  Handlers implement `ICommandHandler<TCommand, TResponse>` and return `ValueTask<TResponse>` (not `Task<TResponse>`).
+</Note>
+
+### 3. Validator
+
+```csharp Modules.Identity/Features/v1/Groups/CreateGroup/CreateGroupCommandValidator.cs
+using FluentValidation;
+using FSH.Modules.Identity.Contracts.v1.Groups.CreateGroup;
+
+namespace FSH.Modules.Identity.Features.v1.Groups.CreateGroup;
+
+public sealed class CreateGroupCommandValidator : AbstractValidator<CreateGroupCommand>
+{
+    public CreateGroupCommandValidator()
+    {
+        RuleFor(x => x.Name)
+            .NotEmpty().WithMessage("Group name is required.")
+            .MaximumLength(256).WithMessage("Group name must not exceed 256 characters.");
+
+        RuleFor(x => x.Description)
+            .MaximumLength(1024).WithMessage("Description must not exceed 1024 characters.");
+    }
+}
+```
+
+<Note>
+  Validators are automatically discovered and registered through `AddValidatorsFromAssemblies()` in the module loader.
+</Note>
+
+### 4. Endpoint Mapping
+
+```csharp Modules.Identity/Features/v1/Groups/CreateGroup/CreateGroupEndpoint.cs
+using FSH.Framework.Shared.Identity;
+using FSH.Framework.Shared.Identity.Authorization;
+using FSH.Modules.Identity.Contracts.v1.Groups.CreateGroup;
+using Mediator;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Routing;
+
+namespace FSH.Modules.Identity.Features.v1.Groups.CreateGroup;
+
+public static class CreateGroupEndpoint
+{
+    public static RouteHandlerBuilder MapCreateGroupEndpoint(this IEndpointRouteBuilder endpoints)
+    {
+        return endpoints.MapPost("/groups", 
+            (IMediator mediator, [FromBody] CreateGroupCommand request, CancellationToken cancellationToken) =>
+                mediator.Send(request, cancellationToken))
+        .WithName("CreateGroup")
+        .WithSummary("Create a new group")
+        .RequirePermission(IdentityPermissionConstants.Groups.Create)
+        .WithDescription("Create a new group with optional role assignments.");
+    }
+}
+```
+
+<Note>
+  Endpoints use **Minimal APIs** (no controllers). The `.RequirePermission()` extension enforces authorization.
+</Note>
+
+### 5. Module Registration
+
+The endpoint is registered in `IdentityModule.MapEndpoints()`:
+
+```csharp src/Modules/Identity/IdentityModule.cs
+public void MapEndpoints(IEndpointRouteBuilder endpoints)
+{
+    var group = endpoints
+        .MapGroup("api/v{version:apiVersion}/identity")
+        .WithTags("Identity")
+        .WithApiVersionSet(apiVersionSet);
+
+    // Register the CreateGroup endpoint
+    group.MapCreateGroupEndpoint();
+    
+    // ... other endpoints
+}
+```
+
+## Query Example: GetGroupById
+
+Queries follow the same pattern but use `IQuery<T>` instead:
+
+<CodeGroup>
+```csharp Query Contract
+// Modules.Identity.Contracts/v1/Groups/GetGroupById/
+using FSH.Modules.Identity.Contracts.DTOs;
+using Mediator;
+
+namespace FSH.Modules.Identity.Contracts.v1.Groups.GetGroupById;
+
+public sealed record GetGroupByIdQuery(Guid Id) : IQuery<GroupDto>;
+```
+
+```csharp Query Handler
+// Modules.Identity/Features/v1/Groups/GetGroupById/
+using FSH.Framework.Core.Exceptions;
+using FSH.Modules.Identity.Contracts.DTOs;
+using FSH.Modules.Identity.Contracts.v1.Groups.GetGroupById;
+using FSH.Modules.Identity.Data;
+using Mediator;
+using Microsoft.EntityFrameworkCore;
+
+namespace FSH.Modules.Identity.Features.v1.Groups.GetGroupById;
+
+public sealed class GetGroupByIdQueryHandler : IQueryHandler<GetGroupByIdQuery, GroupDto>
+{
+    private readonly IdentityDbContext _dbContext;
+
+    public GetGroupByIdQueryHandler(IdentityDbContext dbContext)
+    {
+        _dbContext = dbContext;
+    }
+
+    public async ValueTask<GroupDto> Handle(GetGroupByIdQuery query, CancellationToken cancellationToken)
+    {
+        var group = await _dbContext.Groups
+            .Include(g => g.GroupRoles)
+            .FirstOrDefaultAsync(g => g.Id == query.Id, cancellationToken)
+            ?? throw new NotFoundException($"Group with ID '{query.Id}' not found.");
+
+        var memberCount = await _dbContext.UserGroups
+            .CountAsync(ug => ug.GroupId == group.Id, cancellationToken);
+
+        var roleIds = group.GroupRoles.Select(gr => gr.RoleId).ToList();
+        var roleNames = roleIds.Count > 0
+            ? await _dbContext.Roles
+                .Where(r => roleIds.Contains(r.Id))
+                .Select(r => r.Name!)
+                .ToListAsync(cancellationToken)
+            : [];
+
+        return new GroupDto
+        {
+            Id = group.Id,
+            Name = group.Name,
+            Description = group.Description,
+            IsDefault = group.IsDefault,
+            IsSystemGroup = group.IsSystemGroup,
+            MemberCount = memberCount,
+            RoleIds = roleIds.AsReadOnly(),
+            RoleNames = roleNames.AsReadOnly(),
+            CreatedAt = group.CreatedAt
+        };
+    }
+}
+```
+</CodeGroup>
+
+## Benefits of Vertical Slices
+
+<CardGroup cols={2}>
+  <Card title="High Cohesion" icon="magnet">
+    Related code lives together. No jumping between folders.
+  </Card>
+  <Card title="Low Coupling" icon="link-slash">
+    Features are independent. Changes to one feature don't affect others.
+  </Card>
+  <Card title="Easy Navigation" icon="map">
+    Feature name tells you exactly where to find the code.
+  </Card>
+  <Card title="Simple Testing" icon="flask">
+    Test one feature at a time with clear boundaries.
+  </Card>
+</CardGroup>
+
+## Feature Organization
+
+The Identity module organizes features by domain concept and version:
+
+```
+Modules.Identity/Features/
+└── v1/
+    ├── Users/
+    │   ├── RegisterUser/
+    │   ├── DeleteUser/
+    │   ├── GetUserById/
+    │   ├── GetUsers/
+    │   ├── SearchUsers/
+    │   ├── ChangePassword/
+    │   └── AssignUserRoles/
+    ├── Roles/
+    │   ├── GetRoles/
+    │   ├── GetRoleById/
+    │   ├── UpsertRole/
+    │   ├── DeleteRole/
+    │   └── UpdateRolePermissions/
+    ├── Groups/
+    │   ├── CreateGroup/
+    │   ├── UpdateGroup/
+    │   ├── DeleteGroup/
+    │   ├── GetGroups/
+    │   ├── GetGroupById/
+    │   ├── GetGroupMembers/
+    │   └── AddUsersToGroup/
+    ├── Tokens/
+    │   ├── TokenGeneration/
+    │   └── RefreshToken/
+    └── Sessions/
+        ├── GetMySessions/
+        ├── RevokeSession/
+        └── RevokeAllSessions/
+```
+
+<Note>
+  The `v1/` folder enables API versioning. Future breaking changes go in `v2/`, `v3/`, etc.
+</Note>
+
+## Naming Conventions
+
+Feature names follow the pattern:
+
+```
+{Action}{Entity}
+```
+
+Examples:
+- `CreateGroup` (not `AddGroup` or `NewGroup`)
+- `DeleteUser` (not `RemoveUser`)
+- `UpdateRolePermissions` (not `ModifyPermissions`)
+
+<Warning>
+  Use accurate verbs:
+  - **Create** = new entity
+  - **Update** = modify existing
+  - **Upsert** = create or update
+  - **Delete** = remove entity
+  - **Get** = query single entity
+  - **List/Search** = query multiple entities
+</Warning>
+
+## Validation Pipeline
+
+Validators are executed automatically via a Mediator pipeline behavior:
+
+```csharp src/BuildingBlocks/Web/Mediator/Behaviors/ValidationBehavior.cs
+public class ValidationBehavior<TMessage, TResponse> : IPipelineBehavior<TMessage, TResponse>
+    where TMessage : IMessage
+{
+    private readonly IEnumerable<IValidator<TMessage>> _validators;
+
+    public async ValueTask<TResponse> Handle(
+        TMessage message,
+        CancellationToken cancellationToken,
+        MessageHandlerDelegate<TMessage, TResponse> next)
+    {
+        if (_validators.Any())
+        {
+            var context = new ValidationContext<TMessage>(message);
+            var validationResults = await Task.WhenAll(
+                _validators.Select(v => v.ValidateAsync(context, cancellationToken)));
+
+            var failures = validationResults
+                .SelectMany(r => r.Errors)
+                .Where(f => f != null)
+                .ToList();
+
+            if (failures.Count != 0)
+            {
+                throw new ValidationException(failures);
+            }
+        }
+
+        return await next(message, cancellationToken);
+    }
+}
+```
+
+<Note>
+  Validation happens **before** the handler executes. If validation fails, the handler never runs.
+</Note>
+
+## Complete Request Flow
+
+<Steps>
+  <Step title="HTTP Request">
+    Client sends `POST /api/v1/identity/groups` with JSON body
+  </Step>
+  <Step title="Model Binding">
+    ASP.NET Core binds JSON to `CreateGroupCommand`
+  </Step>
+  <Step title="Authorization">
+    `.RequirePermission()` checks user has `Groups.Create` permission
+  </Step>
+  <Step title="Validation">
+    `ValidationBehavior` runs `CreateGroupCommandValidator`
+  </Step>
+  <Step title="Handler Execution">
+    `CreateGroupCommandHandler.Handle()` executes business logic
+  </Step>
+  <Step title="Response">
+    Handler returns `GroupDto` which is serialized to JSON
+  </Step>
+</Steps>
+
+## Testing a Vertical Slice
+
+Each feature can be tested independently:
+
+```csharp
+public class CreateGroupTests
+{
+    [Fact]
+    public async Task CreateGroup_WithValidCommand_ReturnsGroupDto()
+    {
+        // Arrange
+        var dbContext = CreateInMemoryDbContext();
+        var currentUser = CreateMockCurrentUser();
+        var handler = new CreateGroupCommandHandler(dbContext, currentUser);
+        var command = new CreateGroupCommand("Admins", "Admin group", false, null);
+
+        // Act
+        var result = await handler.Handle(command, CancellationToken.None);
+
+        // Assert
+        Assert.NotNull(result);
+        Assert.Equal("Admins", result.Name);
+    }
+
+    [Fact]
+    public async Task CreateGroup_WithDuplicateName_ThrowsCustomException()
+    {
+        // Arrange
+        var dbContext = CreateInMemoryDbContext();
+        await dbContext.Groups.AddAsync(Group.Create("Admins", null, false, false, null));
+        await dbContext.SaveChangesAsync();
+        
+        var handler = new CreateGroupCommandHandler(dbContext, CreateMockCurrentUser());
+        var command = new CreateGroupCommand("Admins", "Duplicate", false, null);
+
+        // Act & Assert
+        await Assert.ThrowsAsync<CustomException>(() => 
+            handler.Handle(command, CancellationToken.None));
+    }
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="CQRS & Mediator" href="/architecture/cqrs-mediator" icon="arrows-split-up-and-left">
+    Deep dive into ICommand, IQuery, and handlers
+  </Card>
+  <Card title="Domain-Driven Design" href="/architecture/domain-driven-design" icon="diagram-project">
+    Learn about entities, aggregates, and domain events
+  </Card>
+</CardGroup>

@@ -1,0 +1,518 @@
+---
+title: Eventing Building Block
+description: Domain events, integration events, and outbox pattern for event-driven architecture
+icon: signal
+---
+
+## Overview
+
+The **Eventing** building block provides infrastructure for event-driven architecture. It supports domain events (in-process), integration events (cross-module/service), and implements the transactional outbox pattern.
+
+<Note>
+  **Domain Events** for in-process messaging | **Integration Events** for cross-boundary communication
+</Note>
+
+## Key Concepts
+
+### Domain Events vs Integration Events
+
+| Aspect | Domain Events | Integration Events |
+|--------|---------------|--------------------|
+| **Scope** | Single process/transaction | Cross-module/service |
+| **Timing** | Synchronous (within transaction) | Asynchronous (after transaction) |
+| **Handler** | `INotificationHandler<T>` (Mediator) | `IIntegrationEventHandler<T>` |
+| **Use Case** | Business logic side effects | Module communication |
+
+## Key Components
+
+### IDomainEvent
+
+Defined in Core building block:
+
+```csharp IDomainEvent.cs
+namespace FSH.Framework.Core.Domain;
+
+public interface IDomainEvent
+{
+    Guid EventId { get; }
+    DateTimeOffset OccurredOnUtc { get; }
+    string? CorrelationId { get; }
+    string? TenantId { get; }
+}
+```
+
+### IIntegrationEvent
+
+For cross-boundary communication:
+
+```csharp IIntegrationEvent.cs
+namespace FSH.Framework.Eventing.Abstractions;
+
+public interface IIntegrationEvent
+{
+    Guid Id { get; }
+    DateTime OccurredOnUtc { get; }
+    string? TenantId { get; }
+    string CorrelationId { get; }
+    string Source { get; }  // Module/service name
+}
+```
+
+### IEventBus
+
+Main abstraction for publishing integration events:
+
+```csharp IEventBus.cs
+namespace FSH.Framework.Eventing.Abstractions;
+
+public interface IEventBus
+{
+    Task PublishAsync(IIntegrationEvent @event, CancellationToken ct = default);
+    Task PublishAsync(IEnumerable<IIntegrationEvent> events, CancellationToken ct = default);
+}
+```
+
+### IIntegrationEventHandler&lt;T&gt;
+
+Handler for integration events:
+
+```csharp IIntegrationEventHandler.cs
+namespace FSH.Framework.Eventing.Abstractions;
+
+public interface IIntegrationEventHandler<in T>
+    where T : IIntegrationEvent
+{
+    Task HandleAsync(T @event, CancellationToken ct = default);
+}
+```
+
+## Registration
+
+<CodeGroup>
+```csharp Module.cs (Service Registration)
+using FSH.Framework.Eventing;
+
+public void ConfigureServices(IHostApplicationBuilder builder)
+{
+    // Register eventing core (serializer, bus, options)
+    builder.Services.AddEventingCore(builder.Configuration);
+
+    // Register outbox/inbox for this module's DbContext
+    builder.Services.AddEventingForDbContext<CatalogDbContext>();
+
+    // Register integration event handlers
+    builder.Services.AddIntegrationEventHandlers(
+        typeof(CatalogModule).Assembly);
+}
+```
+
+```json appsettings.json (Configuration)
+{
+  "EventingOptions": {
+    "Provider": "InMemory",  // or "RabbitMQ"
+    "UseHostedServiceDispatcher": true,
+    "RabbitMQ": {
+      "HostName": "localhost",
+      "UserName": "guest",
+      "Password": "guest"
+    }
+  }
+}
+```
+</CodeGroup>
+
+## Domain Events
+
+### 1. Define Domain Event
+
+```csharp ProductCreatedEvent.cs
+using FSH.Framework.Core.Domain;
+
+namespace MyModule.Domain.Events;
+
+public sealed record ProductCreatedEvent(
+    Guid EventId,
+    DateTimeOffset OccurredOnUtc,
+    Guid ProductId,
+    string ProductName,
+    decimal Price,
+    string? CorrelationId = null,
+    string? TenantId = null
+) : DomainEvent(EventId, OccurredOnUtc, CorrelationId, TenantId);
+```
+
+### 2. Raise Domain Event
+
+```csharp Product.cs
+using FSH.Framework.Core.Domain;
+
+public sealed class Product : AggregateRoot<Guid>
+{
+    public string Name { get; private set; } = default!;
+    public decimal Price { get; private set; }
+
+    public static Product Create(string name, decimal price)
+    {
+        var product = new Product
+        {
+            Id = Guid.NewGuid(),
+            Name = name,
+            Price = price
+        };
+
+        // Raise domain event
+        var @event = DomainEvent.Create<ProductCreatedEvent>(
+            (id, occurredOn) => new(
+                id,
+                occurredOn,
+                product.Id,
+                product.Name,
+                product.Price)
+        );
+        product.AddDomainEvent(@event);
+
+        return product;
+    }
+}
+```
+
+### 3. Handle Domain Event
+
+```csharp ProductCreatedEventHandler.cs
+using FSH.Framework.Core.Domain;
+using Mediator;
+
+namespace MyModule.Features.EventHandlers;
+
+public sealed class ProductCreatedEventHandler 
+    : INotificationHandler<ProductCreatedEvent>
+{
+    private readonly ILogger<ProductCreatedEventHandler> _logger;
+    private readonly ICacheService _cache;
+
+    public async ValueTask Handle(
+        ProductCreatedEvent notification,
+        CancellationToken ct)
+    {
+        _logger.LogInformation(
+            "Product created: {ProductId} - {ProductName}",
+            notification.ProductId,
+            notification.ProductName);
+
+        // Invalidate cache
+        await _cache.RemoveItemAsync("products:featured", ct);
+    }
+}
+```
+
+<Note>
+  Domain events are dispatched automatically by `DomainEventsInterceptor` during `SaveChangesAsync`.
+</Note>
+
+## Integration Events
+
+### 1. Define Integration Event
+
+```csharp ProductPublishedEvent.cs
+using FSH.Framework.Eventing.Abstractions;
+
+namespace MyModule.Contracts.Events;
+
+public sealed record ProductPublishedEvent(
+    Guid Id,
+    DateTime OccurredOnUtc,
+    Guid ProductId,
+    string ProductName,
+    decimal Price,
+    string? TenantId,
+    string CorrelationId,
+    string Source = "Catalog"
+) : IIntegrationEvent;
+```
+
+### 2. Publish Integration Event
+
+```csharp PublishProductHandler.cs
+using FSH.Framework.Eventing.Abstractions;
+using FSH.Framework.Eventing.Outbox;
+
+public sealed class PublishProductHandler : ICommandHandler<PublishProductCommand>
+{
+    private readonly CatalogDbContext _db;
+    private readonly OutboxDispatcher _outboxDispatcher;
+
+    public async ValueTask<Unit> Handle(PublishProductCommand cmd, CancellationToken ct)
+    {
+        var product = await _db.Products.FindAsync([cmd.ProductId], ct)
+            ?? throw new NotFoundException($"Product {cmd.ProductId} not found.");
+
+        product.Publish();
+        await _db.SaveChangesAsync(ct);
+
+        // Publish integration event via outbox
+        var integrationEvent = new ProductPublishedEvent(
+            Guid.NewGuid(),
+            DateTime.UtcNow,
+            product.Id,
+            product.Name,
+            product.Price,
+            null,  // TenantId
+            Guid.NewGuid().ToString(),
+            "Catalog"
+        );
+
+        await _outboxDispatcher.DispatchAsync([integrationEvent], ct);
+
+        return Unit.Value;
+    }
+}
+```
+
+### 3. Handle Integration Event
+
+```csharp ProductPublishedEventHandler.cs
+using FSH.Framework.Eventing.Abstractions;
+
+namespace InventoryModule.EventHandlers;
+
+public sealed class ProductPublishedEventHandler 
+    : IIntegrationEventHandler<ProductPublishedEvent>
+{
+    private readonly InventoryDbContext _db;
+    private readonly ILogger<ProductPublishedEventHandler> _logger;
+
+    public async Task HandleAsync(ProductPublishedEvent @event, CancellationToken ct)
+    {
+        _logger.LogInformation(
+            "Received ProductPublished event for {ProductId}",
+            @event.ProductId);
+
+        // Create inventory record
+        var inventoryItem = InventoryItem.Create(
+            @event.ProductId,
+            @event.ProductName,
+            initialQuantity: 0);
+
+        await _db.InventoryItems.AddAsync(inventoryItem, ct);
+        await _db.SaveChangesAsync(ct);
+    }
+}
+```
+
+## Outbox Pattern
+
+Ensures reliable event publishing with transactional guarantees.
+
+### How It Works
+
+<Steps>
+  <Step title="Write to Outbox">
+    Integration events are written to `OutboxMessages` table in the same transaction as domain changes.
+  </Step>
+  <Step title="Background Dispatcher">
+    A hosted service polls the outbox and publishes pending events to the event bus.
+  </Step>
+  <Step title="Mark as Processed">
+    After successful publishing, events are marked as processed.
+  </Step>
+  <Step title="Retry on Failure">
+    Failed events are retried with exponential backoff.
+  </Step>
+</Steps>
+
+### OutboxMessage Entity
+
+```csharp OutboxMessage.cs
+namespace FSH.Framework.Eventing.Outbox;
+
+public class OutboxMessage
+{
+    public Guid Id { get; set; }
+    public DateTime CreatedOnUtc { get; set; }
+    public string Type { get; set; } = default!;
+    public string Payload { get; set; } = default!;  // JSON
+    public string? TenantId { get; set; }
+    public string? CorrelationId { get; set; }
+    public DateTime? ProcessedOnUtc { get; set; }
+    public int RetryCount { get; set; }
+    public string? LastError { get; set; }
+    public bool IsDead { get; set; }  // Dead letter after max retries
+}
+```
+
+### Configure DbContext
+
+```csharp CatalogDbContext.cs
+using FSH.Framework.Eventing.Outbox;
+using Microsoft.EntityFrameworkCore;
+
+public sealed class CatalogDbContext : BaseDbContext
+{
+    public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
+    public DbSet<InboxMessage> InboxMessages => Set<InboxMessage>();
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        // Configure outbox
+        modelBuilder.ApplyConfiguration(new OutboxMessageConfiguration("catalog"));
+        modelBuilder.ApplyConfiguration(new InboxMessageConfiguration("catalog"));
+
+        base.OnModelCreating(modelBuilder);
+    }
+}
+```
+
+## Event Providers
+
+### InMemory (Default)
+
+Events are published in-process using Mediator:
+
+```json appsettings.json
+{
+  "EventingOptions": {
+    "Provider": "InMemory"
+  }
+}
+```
+
+**Use Case**: Modular monolith, single-process applications.
+
+### RabbitMQ
+
+Events are published to RabbitMQ for distributed systems:
+
+```json appsettings.json
+{
+  "EventingOptions": {
+    "Provider": "RabbitMQ",
+    "RabbitMQ": {
+      "HostName": "localhost",
+      "Port": 5672,
+      "UserName": "guest",
+      "Password": "guest",
+      "VirtualHost": "/",
+      "ExchangeName": "fsh-events"
+    }
+  }
+}
+```
+
+**Use Case**: Microservices, distributed modules.
+
+## Inbox Pattern
+
+Ensures idempotent event handling (prevents duplicate processing).
+
+```csharp InboxMessage.cs
+namespace FSH.Framework.Eventing.Inbox;
+
+public class InboxMessage
+{
+    public Guid Id { get; set; }
+    public string Type { get; set; } = default!;
+    public DateTime ReceivedOnUtc { get; set; }
+    public DateTime? ProcessedOnUtc { get; set; }
+}
+```
+
+**How It Works:**
+1. When an integration event is received, check if it exists in the inbox
+2. If exists, skip processing (already handled)
+3. If not exists, add to inbox and process the event
+
+## Best Practices
+
+<Steps>
+  <Step title="Domain Events for Side Effects">
+    Use domain events for in-process side effects (cache invalidation, notifications).
+  </Step>
+  <Step title="Integration Events for Communication">
+    Use integration events for cross-module/service communication.
+  </Step>
+  <Step title="Always Use Outbox">
+    Always publish integration events via outbox to ensure transactional consistency.
+  </Step>
+  <Step title="Idempotent Handlers">
+    Design event handlers to be idempotent (safe to run multiple times).
+  </Step>
+  <Step title="Version Events">
+    Include version numbers in event contracts for backward compatibility.
+  </Step>
+</Steps>
+
+## Event Serialization
+
+Events are serialized to JSON using `System.Text.Json`:
+
+```csharp JsonEventSerializer.cs
+namespace FSH.Framework.Eventing.Serialization;
+
+public sealed class JsonEventSerializer : IEventSerializer
+{
+    private static readonly JsonSerializerOptions Options = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+    };
+
+    public string Serialize(IIntegrationEvent @event)
+    {
+        return JsonSerializer.Serialize(@event, @event.GetType(), Options);
+    }
+
+    public IIntegrationEvent? Deserialize(string type, string payload)
+    {
+        var eventType = Type.GetType(type);
+        if (eventType is null) return null;
+
+        return JsonSerializer.Deserialize(payload, eventType, Options) as IIntegrationEvent;
+    }
+}
+```
+
+## Troubleshooting
+
+### Domain Events Not Firing
+
+- Verify `DomainEventsInterceptor` is registered
+- Check that entities inherit from `BaseEntity<TId>`
+- Ensure `SaveChangesAsync` is called
+
+### Integration Events Not Published
+
+- Verify `OutboxDispatcher` hosted service is running
+- Check outbox table for pending messages
+- Review logs for errors during dispatch
+
+### Duplicate Event Handling
+
+- Implement inbox pattern for idempotency
+- Use unique `CorrelationId` to track events
+- Design handlers to be idempotent
+
+## Package Reference
+
+```xml YourModule.csproj
+<ItemGroup>
+  <ProjectReference Include="..\..\BuildingBlocks\Eventing\FSH.Framework.Eventing.csproj" />
+  <ProjectReference Include="..\..\BuildingBlocks\Eventing.Abstractions\FSH.Framework.Eventing.Abstractions.csproj" />
+</ItemGroup>
+```
+
+## Related Resources
+
+<CardGroup cols={2}>
+  <Card title="Core Building Block" icon="gem" href="/building-blocks/core">
+    Domain events and DDD primitives
+  </Card>
+  <Card title="Persistence Building Block" icon="database" href="/building-blocks/persistence">
+    Outbox/Inbox table configuration
+  </Card>
+  <Card title="Event-Driven Architecture" icon="book" href="https://martinfowler.com/articles/201701-event-driven.html">
+    Learn about event-driven patterns
+  </Card>
+  <Card title="Outbox Pattern" icon="book" href="https://microservices.io/patterns/data/transactional-outbox.html">
+    Transactional outbox pattern explained
+  </Card>
+</CardGroup>

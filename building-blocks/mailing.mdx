@@ -1,0 +1,622 @@
+---
+title: Mailing Building Block
+description: Email service with SMTP and SendGrid providers
+icon: envelope
+---
+
+## Overview
+
+The **Mailing** building block provides email sending capabilities with support for SMTP and SendGrid providers. It offers a simple, provider-agnostic interface for sending emails.
+
+<Note>
+  Switch between SMTP and SendGrid without changing your code — just update configuration.
+</Note>
+
+## Key Components
+
+### IMailService
+
+Main abstraction for email operations:
+
+```csharp IMailService.cs
+namespace FSH.Framework.Mailing.Services;
+
+public interface IMailService
+{
+    Task SendAsync(MailRequest request, CancellationToken ct);
+}
+```
+
+### MailRequest
+
+Email request model:
+
+```csharp MailRequest.cs
+using System.Collections.ObjectModel;
+
+namespace FSH.Framework.Mailing;
+
+public class MailRequest
+{
+    public Collection<string> To { get; }
+    public string Subject { get; }
+    public string? Body { get; }
+    public string? From { get; }
+    public string? DisplayName { get; }
+    public string? ReplyTo { get; }
+    public string? ReplyToName { get; }
+    public Collection<string> Bcc { get; }
+    public Collection<string> Cc { get; }
+    public IDictionary<string, byte[]> AttachmentData { get; }
+    public IDictionary<string, string> Headers { get; }
+
+    public MailRequest(
+        Collection<string> to,
+        string subject,
+        string? body = null,
+        string? from = null,
+        string? displayName = null,
+        string? replyTo = null,
+        string? replyToName = null,
+        Collection<string>? bcc = null,
+        Collection<string>? cc = null,
+        IDictionary<string, byte[]>? attachmentData = null,
+        IDictionary<string, string>? headers = null)
+    {
+        To = to;
+        Subject = subject;
+        Body = body;
+        From = from;
+        DisplayName = displayName;
+        ReplyTo = replyTo;
+        ReplyToName = replyToName;
+        Bcc = bcc ?? new Collection<string>();
+        Cc = cc ?? new Collection<string>();
+        AttachmentData = attachmentData ?? new Dictionary<string, byte[]>();
+        Headers = headers ?? new Dictionary<string, string>();
+    }
+}
+```
+
+### MailOptions
+
+Configuration for mail providers:
+
+```csharp MailOptions.cs
+namespace FSH.Framework.Mailing;
+
+public class MailOptions
+{
+    public bool UseSendGrid { get; set; }
+    public string? From { get; set; }
+    public string? DisplayName { get; set; }
+    public SmtpOptions? Smtp { get; set; }
+    public SendGridOptions? SendGrid { get; set; }
+}
+
+public class SmtpOptions
+{
+    public string? Host { get; set; }
+    public int Port { get; set; }
+    public string? UserName { get; set; }
+    public string? Password { get; set; }
+}
+
+public class SendGridOptions
+{
+    public string? ApiKey { get; set; }
+    public string? From { get; set; }
+    public string? DisplayName { get; set; }
+}
+```
+
+## Registration
+
+<CodeGroup>
+```csharp Program.cs (Services)
+using FSH.Framework.Mailing;
+
+builder.Services.AddHeroMailing();
+
+// Or via platform registration
+builder.AddHeroPlatform(options =>
+{
+    options.EnableMailing = true; // Enables mailing
+});
+```
+
+```json appsettings.json (SMTP Configuration)
+{
+  "MailOptions": {
+    "UseSendGrid": false,
+    "From": "noreply@example.com",
+    "DisplayName": "FSH Application",
+    "Smtp": {
+      "Host": "smtp.gmail.com",
+      "Port": 587,
+      "UserName": "your-email@gmail.com",
+      "Password": "your-app-password"
+    }
+  }
+}
+```
+
+```json appsettings.Production.json (SendGrid)
+{
+  "MailOptions": {
+    "UseSendGrid": true,
+    "SendGrid": {
+      "ApiKey": "SG.xxxxxxxxxxxxxxxxxxxxx",
+      "From": "noreply@yourdomain.com",
+      "DisplayName": "Your Company"
+    }
+  }
+}
+```
+</CodeGroup>
+
+## Usage Examples
+
+### Basic Email
+
+```csharp SendWelcomeEmailHandler.cs
+using FSH.Framework.Mailing;
+using FSH.Framework.Mailing.Services;
+using System.Collections.ObjectModel;
+
+public sealed class SendWelcomeEmailHandler : ICommandHandler<SendWelcomeEmailCommand>
+{
+    private readonly IMailService _mailService;
+
+    public SendWelcomeEmailHandler(IMailService mailService)
+    {
+        _mailService = mailService;
+    }
+
+    public async ValueTask<Unit> Handle(SendWelcomeEmailCommand cmd, CancellationToken ct)
+    {
+        var mailRequest = new MailRequest(
+            to: new Collection<string> { cmd.Email },
+            subject: "Welcome to FSH!",
+            body: $"<h1>Welcome {cmd.Name}!</h1><p>Thanks for joining us.</p>"
+        );
+
+        await _mailService.SendAsync(mailRequest, ct);
+        return Unit.Value;
+    }
+}
+```
+
+### Email with Template
+
+```csharp OrderConfirmationService.cs
+using FSH.Framework.Mailing;
+using FSH.Framework.Mailing.Services;
+using System.Collections.ObjectModel;
+
+public sealed class OrderConfirmationService
+{
+    private readonly IMailService _mailService;
+
+    public async Task SendOrderConfirmationAsync(
+        string customerEmail,
+        string orderNumber,
+        decimal totalAmount,
+        CancellationToken ct)
+    {
+        var htmlBody = $@"
+            <html>
+            <body>
+                <h1>Order Confirmation</h1>
+                <p>Thank you for your order!</p>
+                <p><strong>Order Number:</strong> {orderNumber}</p>
+                <p><strong>Total Amount:</strong> ${totalAmount:N2}</p>
+                <p>We'll send you another email when your order ships.</p>
+            </body>
+            </html>";
+
+        var mailRequest = new MailRequest(
+            to: new Collection<string> { customerEmail },
+            subject: $"Order Confirmation - {orderNumber}",
+            body: htmlBody
+        );
+
+        await _mailService.SendAsync(mailRequest, ct);
+    }
+}
+```
+
+### Email with Attachments
+
+```csharp InvoiceEmailService.cs
+using FSH.Framework.Mailing;
+using FSH.Framework.Mailing.Services;
+using System.Collections.ObjectModel;
+
+public sealed class InvoiceEmailService
+{
+    private readonly IMailService _mailService;
+
+    public async Task SendInvoiceAsync(
+        string customerEmail,
+        string invoiceNumber,
+        byte[] pdfBytes,
+        CancellationToken ct)
+    {
+        var attachments = new Dictionary<string, byte[]>
+        {
+            ["invoice.pdf"] = pdfBytes
+        };
+
+        var mailRequest = new MailRequest(
+            to: new Collection<string> { customerEmail },
+            subject: $"Invoice {invoiceNumber}",
+            body: $"<p>Please find your invoice attached.</p>",
+            attachmentData: attachments
+        );
+
+        await _mailService.SendAsync(mailRequest, ct);
+    }
+}
+```
+
+### Email with CC and BCC
+
+```csharp NotificationService.cs
+using FSH.Framework.Mailing;
+using FSH.Framework.Mailing.Services;
+using System.Collections.ObjectModel;
+
+public sealed class NotificationService
+{
+    private readonly IMailService _mailService;
+
+    public async Task NotifyTeamAsync(
+        string primaryEmail,
+        string subject,
+        string body,
+        CancellationToken ct)
+    {
+        var mailRequest = new MailRequest(
+            to: new Collection<string> { primaryEmail },
+            subject: subject,
+            body: body,
+            cc: new Collection<string>
+            {
+                "manager@example.com",
+                "team-lead@example.com"
+            },
+            bcc: new Collection<string>
+            {
+                "audit@example.com"
+            }
+        );
+
+        await _mailService.SendAsync(mailRequest, ct);
+    }
+}
+```
+
+### Password Reset Email
+
+```csharp SendPasswordResetEmailHandler.cs
+using FSH.Framework.Mailing;
+using FSH.Framework.Mailing.Services;
+using System.Collections.ObjectModel;
+
+public sealed class SendPasswordResetEmailHandler 
+    : ICommandHandler<SendPasswordResetEmailCommand>
+{
+    private readonly IMailService _mailService;
+    private readonly IConfiguration _configuration;
+
+    public async ValueTask<Unit> Handle(
+        SendPasswordResetEmailCommand cmd,
+        CancellationToken ct)
+    {
+        var appUrl = _configuration["AppUrl"] ?? "https://localhost:5001";
+        var resetUrl = $"{appUrl}/reset-password?token={cmd.Token}";
+
+        var htmlBody = $@"
+            <html>
+            <body>
+                <h2>Password Reset Request</h2>
+                <p>Click the link below to reset your password:</p>
+                <p><a href='{resetUrl}'>Reset Password</a></p>
+                <p>This link will expire in 24 hours.</p>
+                <p>If you didn't request this, please ignore this email.</p>
+            </body>
+            </html>";
+
+        var mailRequest = new MailRequest(
+            to: new Collection<string> { cmd.Email },
+            subject: "Password Reset Request",
+            body: htmlBody
+        );
+
+        await _mailService.SendAsync(mailRequest, ct);
+        return Unit.Value;
+    }
+}
+```
+
+## Background Job Integration
+
+<Note>
+  Always send emails in background jobs to avoid blocking user requests.
+</Note>
+
+```csharp SendEmailJob.cs
+using FSH.Framework.Jobs.Services;
+using FSH.Framework.Mailing;
+using FSH.Framework.Mailing.Services;
+
+public sealed class SendEmailJob
+{
+    private readonly IMailService _mailService;
+
+    public SendEmailJob(IMailService mailService)
+    {
+        _mailService = mailService;
+    }
+
+    public async Task ExecuteAsync(MailRequest request, CancellationToken ct)
+    {
+        await _mailService.SendAsync(request, ct);
+    }
+}
+
+// Enqueue from handler
+public sealed class CreateOrderHandler : ICommandHandler<CreateOrderCommand, Guid>
+{
+    private readonly IJobService _jobService;
+
+    public async ValueTask<Guid> Handle(CreateOrderCommand cmd, CancellationToken ct)
+    {
+        // ... create order logic
+
+        // Enqueue email job
+        var mailRequest = new MailRequest(
+            to: new Collection<string> { cmd.CustomerEmail },
+            subject: "Order Confirmation",
+            body: "Your order has been confirmed."
+        );
+
+        _jobService.Enqueue<SendEmailJob>(job => job.ExecuteAsync(mailRequest, ct));
+
+        return orderId;
+    }
+}
+```
+
+## Provider Configuration
+
+### SMTP (Gmail)
+
+<Steps>
+  <Step title="Enable 2FA">
+    Enable two-factor authentication on your Gmail account.
+  </Step>
+  <Step title="Generate App Password">
+    Go to Google Account → Security → App Passwords and generate a password.
+  </Step>
+  <Step title="Configure appsettings.json">
+    ```json
+    {
+      "MailOptions": {
+        "UseSendGrid": false,
+        "From": "your-email@gmail.com",
+        "DisplayName": "Your App",
+        "Smtp": {
+          "Host": "smtp.gmail.com",
+          "Port": 587,
+          "UserName": "your-email@gmail.com",
+          "Password": "your-16-char-app-password"
+        }
+      }
+    }
+    ```
+  </Step>
+</Steps>
+
+### SMTP (Outlook)
+
+```json appsettings.json
+{
+  "MailOptions": {
+    "UseSendGrid": false,
+    "From": "your-email@outlook.com",
+    "DisplayName": "Your App",
+    "Smtp": {
+      "Host": "smtp-mail.outlook.com",
+      "Port": 587,
+      "UserName": "your-email@outlook.com",
+      "Password": "your-password"
+    }
+  }
+}
+```
+
+### SendGrid
+
+<Steps>
+  <Step title="Create SendGrid Account">
+    Sign up at [sendgrid.com](https://sendgrid.com)
+  </Step>
+  <Step title="Generate API Key">
+    Go to Settings → API Keys → Create API Key
+  </Step>
+  <Step title="Verify Sender Identity">
+    Add and verify your sender email or domain.
+  </Step>
+  <Step title="Configure appsettings.json">
+    ```json
+    {
+      "MailOptions": {
+        "UseSendGrid": true,
+        "SendGrid": {
+          "ApiKey": "SG.xxxxxxxxxxxxxxxxxxxxx",
+          "From": "noreply@yourdomain.com",
+          "DisplayName": "Your Company"
+        }
+      }
+    }
+    ```
+  </Step>
+</Steps>
+
+## Best Practices
+
+<Steps>
+  <Step title="Use Background Jobs">
+    Always send emails asynchronously via background jobs to avoid blocking requests.
+  </Step>
+  <Step title="HTML Templates">
+    Store email templates in separate files or use a templating engine like Razor.
+  </Step>
+  <Step title="Test in Development">
+    Use tools like [Mailhog](https://github.com/mailhog/MailHog) or [Papercut](https://github.com/ChangemakerStudios/Papercut-SMTP) for local testing.
+  </Step>
+  <Step title="Handle Failures Gracefully">
+    Wrap email sending in try-catch and log failures. Don't fail the entire operation if email fails.
+  </Step>
+  <Step title="Rate Limiting">
+    Be aware of provider rate limits (e.g., SendGrid free tier: 100 emails/day).
+  </Step>
+</Steps>
+
+## Error Handling
+
+```csharp SafeEmailService.cs
+using FSH.Framework.Mailing;
+using FSH.Framework.Mailing.Services;
+using Microsoft.Extensions.Logging;
+
+public sealed class SafeEmailService
+{
+    private readonly IMailService _mailService;
+    private readonly ILogger<SafeEmailService> _logger;
+
+    public async Task<bool> TrySendAsync(
+        MailRequest request,
+        CancellationToken ct)
+    {
+        try
+        {
+            await _mailService.SendAsync(request, ct);
+            _logger.LogInformation("Email sent successfully to {Recipients}", 
+                string.Join(", ", request.To));
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send email to {Recipients}", 
+                string.Join(", ", request.To));
+            return false;
+        }
+    }
+}
+```
+
+## Testing
+
+### Local SMTP Server (Mailhog)
+
+```yaml docker-compose.yml
+services:
+  mailhog:
+    image: mailhog/mailhog:latest
+    ports:
+      - "1025:1025"  # SMTP
+      - "8025:8025"  # Web UI
+```
+
+```json appsettings.Development.json
+{
+  "MailOptions": {
+    "UseSendGrid": false,
+    "From": "dev@localhost",
+    "Smtp": {
+      "Host": "localhost",
+      "Port": 1025,
+      "UserName": "",
+      "Password": ""
+    }
+  }
+}
+```
+
+Access Mailhog UI at `http://localhost:8025` to view sent emails.
+
+### Mock for Unit Tests
+
+```csharp EmailServiceTests.cs
+using FSH.Framework.Mailing.Services;
+using NSubstitute;
+
+public class EmailServiceTests
+{
+    [Fact]
+    public async Task Should_Send_Welcome_Email()
+    {
+        // Arrange
+        var mockMailService = Substitute.For<IMailService>();
+        var handler = new SendWelcomeEmailHandler(mockMailService);
+        var command = new SendWelcomeEmailCommand("test@example.com", "John");
+
+        // Act
+        await handler.Handle(command, CancellationToken.None);
+
+        // Assert
+        await mockMailService.Received(1).SendAsync(
+            Arg.Is<MailRequest>(r => r.To.Contains("test@example.com")),
+            Arg.Any<CancellationToken>()
+        );
+    }
+}
+```
+
+## Troubleshooting
+
+### SMTP Authentication Failed
+
+- Verify username and password
+- Check if 2FA is enabled (Gmail requires app passwords)
+- Ensure "Less secure app access" is enabled (if applicable)
+
+### SendGrid 403 Forbidden
+
+- Verify API key is correct
+- Check sender email is verified in SendGrid
+- Ensure API key has "Mail Send" permission
+
+### Emails Going to Spam
+
+- Configure SPF, DKIM, and DMARC records for your domain
+- Use a verified sender domain
+- Avoid spammy subject lines and content
+
+## Package Reference
+
+```xml YourModule.csproj
+<ItemGroup>
+  <ProjectReference Include="..\..\BuildingBlocks\Mailing\FSH.Framework.Mailing.csproj" />
+</ItemGroup>
+```
+
+## Related Resources
+
+<CardGroup cols={2}>
+  <Card title="Jobs Building Block" icon="clock" href="/building-blocks/jobs">
+    Send emails via background jobs
+  </Card>
+  <Card title="SendGrid Docs" icon="book" href="https://docs.sendgrid.com/">
+    Official SendGrid documentation
+  </Card>
+  <Card title="SMTP Testing" icon="envelope" href="https://github.com/mailhog/MailHog">
+    Mailhog for local email testing
+  </Card>
+  <Card title="Email Best Practices" icon="book" href="https://www.litmus.com/blog/email-best-practices">
+    Email design and deliverability tips
+  </Card>
+</CardGroup>

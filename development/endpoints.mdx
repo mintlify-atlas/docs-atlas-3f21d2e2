@@ -1,0 +1,430 @@
+---
+title: Endpoints
+description: Creating HTTP endpoints using .NET Minimal APIs with authorization
+---
+
+## Overview
+
+FullStackHero uses **.NET Minimal APIs** to map HTTP routes to commands and queries. Every endpoint follows a consistent pattern with built-in permission-based authorization.
+
+## Endpoint Structure
+
+Endpoints are defined as extension methods that map routes to mediator commands/queries:
+
+```csharp
+public static class CreateGroupEndpoint
+{
+    public static RouteHandlerBuilder MapCreateGroupEndpoint(this IEndpointRouteBuilder endpoints)
+    {
+        return endpoints.MapPost("/groups", /* handler */);
+    }
+}
+```
+
+## HTTP Method Mappings
+
+<CardGroup cols={2}>
+  <Card title="MapPost" icon="plus">
+    **Create Resources**
+    - Use for creating new entities
+    - Returns 201 Created
+  </Card>
+  <Card title="MapGet" icon="magnifying-glass">
+    **Read Resources**
+    - Use for fetching data
+    - Returns 200 OK
+  </Card>
+  <Card title="MapPut" icon="pen-to-square">
+    **Update Resources**
+    - Use for full updates
+    - Returns 200 OK or 204 No Content
+  </Card>
+  <Card title="MapDelete" icon="trash">
+    **Delete Resources**
+    - Use for deletions
+    - Returns 204 No Content
+  </Card>
+</CardGroup>
+
+## MapPost - Create Operations
+
+Use `MapPost` for creating new resources:
+
+```csharp title="CreateGroupEndpoint.cs" {16-22}
+using FSH.Framework.Shared.Identity;
+using FSH.Framework.Shared.Identity.Authorization;
+using FSH.Modules.Identity.Contracts.v1.Groups.CreateGroup;
+using Mediator;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Routing;
+
+namespace FSH.Modules.Identity.Features.v1.Groups.CreateGroup;
+
+public static class CreateGroupEndpoint
+{
+    public static RouteHandlerBuilder MapCreateGroupEndpoint(this IEndpointRouteBuilder endpoints)
+    {
+        return endpoints.MapPost("/groups", 
+            (IMediator mediator, [FromBody] CreateGroupCommand request, CancellationToken cancellationToken) =>
+                mediator.Send(request, cancellationToken))
+        .WithName("CreateGroup")
+        .WithSummary("Create a new group")
+        .RequirePermission(IdentityPermissionConstants.Groups.Create)
+        .WithDescription("Create a new group with optional role assignments.");
+    }
+}
+```
+
+### Returning Created Response
+
+Return a `201 Created` response with location header:
+
+```csharp
+return endpoints.MapPost("/groups", async (IMediator mediator, CreateGroupCommand request, CancellationToken ct) =>
+{
+    var result = await mediator.Send(request, ct);
+    return TypedResults.Created($"/api/v1/groups/{result.Id}", result);
+});
+```
+
+## MapGet - Read Operations
+
+### Get by ID
+
+```csharp title="GetGroupByIdEndpoint.cs" {15-21}
+using FSH.Framework.Shared.Identity;
+using FSH.Framework.Shared.Identity.Authorization;
+using FSH.Modules.Identity.Contracts.v1.Groups.GetGroupById;
+using Mediator;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
+
+namespace FSH.Modules.Identity.Features.v1.Groups.GetGroupById;
+
+public static class GetGroupByIdEndpoint
+{
+    public static RouteHandlerBuilder MapGetGroupByIdEndpoint(this IEndpointRouteBuilder endpoints)
+    {
+        return endpoints.MapGet("/groups/{id:guid}", 
+            (Guid id, IMediator mediator, CancellationToken cancellationToken) =>
+                mediator.Send(new GetGroupByIdQuery(id), cancellationToken))
+        .WithName("GetGroupById")
+        .WithSummary("Get group by ID")
+        .RequirePermission(IdentityPermissionConstants.Groups.View)
+        .WithDescription("Retrieve a specific group by its ID including roles and member count.");
+    }
+}
+```
+
+### Get List with Query Parameters
+
+```csharp title="GetGroupsEndpoint.cs"
+public static RouteHandlerBuilder MapGetGroupsEndpoint(this IEndpointRouteBuilder endpoints)
+{
+    return endpoints.MapGet("/groups", 
+        (IMediator mediator, string? search, CancellationToken cancellationToken) =>
+            mediator.Send(new GetGroupsQuery(search), cancellationToken))
+    .WithName("GetGroups")
+    .WithSummary("Get all groups")
+    .RequirePermission(IdentityPermissionConstants.Groups.View)
+    .WithDescription("Retrieve a list of all groups with optional search.");
+}
+```
+
+### Route with Parameters
+
+```csharp title="GetGroupMembersEndpoint.cs"
+public static RouteHandlerBuilder MapGetGroupMembersEndpoint(this IEndpointRouteBuilder endpoints)
+{
+    return endpoints.MapGet("/groups/{groupId:guid}/members", 
+        (Guid groupId, IMediator mediator, CancellationToken cancellationToken) =>
+            mediator.Send(new GetGroupMembersQuery(groupId), cancellationToken))
+    .WithName("GetGroupMembers")
+    .WithSummary("Get group members")
+    .RequirePermission(IdentityPermissionConstants.Groups.View);
+}
+```
+
+## MapPut - Update Operations
+
+```csharp title="UpdateGroupEndpoint.cs" {16-22}
+using FSH.Framework.Shared.Identity;
+using FSH.Framework.Shared.Identity.Authorization;
+using FSH.Modules.Identity.Contracts.v1.Groups.UpdateGroup;
+using Mediator;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Routing;
+
+namespace FSH.Modules.Identity.Features.v1.Groups.UpdateGroup;
+
+public static class UpdateGroupEndpoint
+{
+    public static RouteHandlerBuilder MapUpdateGroupEndpoint(this IEndpointRouteBuilder endpoints)
+    {
+        return endpoints.MapPut("/groups/{id:guid}", 
+            (Guid id, IMediator mediator, [FromBody] UpdateGroupRequest request, CancellationToken cancellationToken) =>
+                mediator.Send(new UpdateGroupCommand(id, request.Name, request.Description, request.IsDefault, request.RoleIds), cancellationToken))
+        .WithName("UpdateGroup")
+        .WithSummary("Update a group")
+        .RequirePermission(IdentityPermissionConstants.Groups.Update)
+        .WithDescription("Update a group's name, description, default status, and role assignments.");
+    }
+}
+
+public sealed record UpdateGroupRequest(
+    string Name,
+    string? Description,
+    bool IsDefault,
+    IReadOnlyList<string>? RoleIds);
+```
+
+<Note>
+  Notice how the endpoint extracts `id` from the route and combines it with the request body to create the command.
+</Note>
+
+## MapDelete - Delete Operations
+
+```csharp title="DeleteGroupEndpoint.cs" {15-21}
+using FSH.Framework.Shared.Identity;
+using FSH.Framework.Shared.Identity.Authorization;
+using FSH.Modules.Identity.Contracts.v1.Groups.DeleteGroup;
+using Mediator;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
+
+namespace FSH.Modules.Identity.Features.v1.Groups.DeleteGroup;
+
+public static class DeleteGroupEndpoint
+{
+    public static RouteHandlerBuilder MapDeleteGroupEndpoint(this IEndpointRouteBuilder endpoints)
+    {
+        return endpoints.MapDelete("/groups/{id:guid}", 
+            (Guid id, IMediator mediator, CancellationToken cancellationToken) =>
+                mediator.Send(new DeleteGroupCommand(id), cancellationToken))
+        .WithName("DeleteGroup")
+        .WithSummary("Delete a group")
+        .RequirePermission(IdentityPermissionConstants.Groups.Delete)
+        .WithDescription("Soft delete a group. System groups cannot be deleted.");
+    }
+}
+```
+
+## Permission-Based Authorization
+
+Every endpoint should use `.RequirePermission()` to enforce authorization.
+
+### RequirePermission Usage
+
+```csharp
+.RequirePermission(IdentityPermissionConstants.Groups.Create)
+```
+
+This extension method is defined in `src/BuildingBlocks/Shared/Identity/Authorization/EndpointExtensions.cs`:
+
+```csharp title="EndpointExtensions.cs"
+using Microsoft.AspNetCore.Builder;
+
+namespace FSH.Framework.Shared.Identity.Authorization;
+
+public static class EndpointExtensions
+{
+    public static TBuilder RequirePermission<TBuilder>(
+        this TBuilder endpointConventionBuilder, 
+        string requiredPermission, 
+        params string[] additionalRequiredPermissions)
+        where TBuilder : IEndpointConventionBuilder
+    {
+        return endpointConventionBuilder.WithMetadata(
+            new RequiredPermissionAttribute(requiredPermission, additionalRequiredPermissions));
+    }
+}
+```
+
+### Multiple Permissions
+
+Require multiple permissions for an endpoint:
+
+```csharp
+.RequirePermission(
+    IdentityPermissionConstants.Groups.View,
+    IdentityPermissionConstants.Groups.ManageMembers)
+```
+
+## Endpoint Metadata
+
+Enhance OpenAPI documentation with metadata:
+
+```csharp
+return endpoints.MapPost("/groups", handler)
+    .WithName("CreateGroup")                    // Operation ID for OpenAPI
+    .WithSummary("Create a new group")          // Brief description
+    .WithDescription("Long description...")     // Detailed description
+    .WithTags("Groups")                         // Group in Swagger UI
+    .Produces<GroupDto>(StatusCodes.Status201Created)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .RequirePermission(IdentityPermissionConstants.Groups.Create);
+```
+
+## Route Constraints
+
+Use route constraints to enforce parameter types:
+
+<CodeGroup>
+
+```csharp Guid
+"/groups/{id:guid}"
+```
+
+```csharp Integer
+"/products/{id:int}"
+```
+
+```csharp String
+"/users/{username:alpha}"
+```
+
+```csharp Multiple
+"/orders/{year:int}/{month:int}/{day:int}"
+```
+
+</CodeGroup>
+
+## Complex Endpoints
+
+### Endpoint with Multiple Parameters
+
+```csharp title="AddUsersToGroupEndpoint.cs"
+public static RouteHandlerBuilder MapAddUsersToGroupEndpoint(this IEndpointRouteBuilder endpoints)
+{
+    return endpoints.MapPost("/groups/{groupId:guid}/members", 
+        (Guid groupId, IMediator mediator, [FromBody] AddUsersRequest request, CancellationToken cancellationToken) =>
+            mediator.Send(new AddUsersToGroupCommand(groupId, request.UserIds), cancellationToken))
+    .WithName("AddUsersToGroup")
+    .WithSummary("Add users to a group")
+    .RequirePermission(IdentityPermissionConstants.Groups.ManageMembers);
+}
+
+public sealed record AddUsersRequest(List<string> UserIds);
+```
+
+### Endpoint with Query Parameters
+
+```csharp
+public static RouteHandlerBuilder MapSearchGroupsEndpoint(this IEndpointRouteBuilder endpoints)
+{
+    return endpoints.MapGet("/groups/search", 
+        (IMediator mediator, 
+         string? search, 
+         int pageNumber = 1, 
+         int pageSize = 10,
+         CancellationToken cancellationToken = default) =>
+            mediator.Send(new GetGroupsQuery(search, pageNumber, pageSize), cancellationToken))
+    .WithName("SearchGroups");
+}
+```
+
+## Registering Endpoints
+
+Endpoints are registered in the module's main class:
+
+```csharp title="IdentityModule.cs"
+public static IEndpointRouteBuilder MapIdentityEndpoints(this IEndpointRouteBuilder app)
+{
+    var versionedApi = app.NewVersionedApi("Identity")
+        .HasApiVersion(1);
+
+    var groups = versionedApi.MapGroup("/api/v{version:apiVersion}/identity")
+        .WithTags("Identity");
+
+    // Register all group endpoints
+    groups.MapCreateGroupEndpoint();
+    groups.MapGetGroupByIdEndpoint();
+    groups.MapGetGroupsEndpoint();
+    groups.MapUpdateGroupEndpoint();
+    groups.MapDeleteGroupEndpoint();
+
+    return app;
+}
+```
+
+## Best Practices
+
+<Steps>
+
+### Use Strongly Typed Parameters
+
+Prefer route constraints over manual parsing:
+
+```csharp
+// Good
+.MapGet("/groups/{id:guid}", (Guid id, ...) => ...)
+
+// Bad
+.MapGet("/groups/{id}", (string id, ...) => 
+{
+    var guid = Guid.Parse(id); // Manual parsing
+})
+```
+
+### Always Include CancellationToken
+
+```csharp
+(IMediator mediator, CreateGroupCommand request, CancellationToken cancellationToken) =>
+    mediator.Send(request, cancellationToken)
+```
+
+### Use [FromBody] for Complex Types
+
+```csharp
+([FromBody] CreateGroupCommand request, ...)
+```
+
+### Add Descriptive Metadata
+
+Always include:
+- `.WithName()` - for OpenAPI operation ID
+- `.WithSummary()` - brief description
+- `.RequirePermission()` - authorization
+
+</Steps>
+
+## Testing Endpoints
+
+Endpoints are tested via integration tests:
+
+```csharp
+[Fact]
+public async Task CreateGroup_Should_Return201Created()
+{
+    // Arrange
+    var command = new CreateGroupCommand("Admins", "Admin group", false, null);
+    
+    // Act
+    var response = await _client.PostAsJsonAsync("/api/v1/identity/groups", command);
+    
+    // Assert
+    response.StatusCode.ShouldBe(HttpStatusCode.Created);
+    var result = await response.Content.ReadFromJsonAsync<GroupDto>();
+    result.ShouldNotBeNull();
+}
+```
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="Permissions" href="/development/permissions" icon="lock">
+    Deep dive into permission system
+  </Card>
+  <Card title="Validation" href="/development/validation" icon="shield-check">
+    Validate endpoint inputs
+  </Card>
+  <Card title="Testing" href="/development/testing" icon="flask">
+    Write endpoint tests
+  </Card>
+</CardGroup>

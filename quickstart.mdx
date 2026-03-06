@@ -1,80 +1,693 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Get a working FullStackHero API running in under 5 minutes
+icon: rocket
 ---
 
-## Get started in three steps
+## Prerequisites
 
-Get your documentation site running locally and make your first customization.
-
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
+<Steps>
+  <Step title="Install .NET 10 SDK">
+    Download from [dotnet.microsoft.com](https://dotnet.microsoft.com/download/dotnet/10.0)
     
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
+    Verify installation:
+    ```bash
+    dotnet --version
+    # Output: 10.0.x
+    ```
+  </Step>
+  
+  <Step title="Install Aspire Workload">
+    ```bash
+    dotnet workload install aspire
+    ```
     
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
+    <Note>
+      Aspire orchestrates Postgres, Redis, and the API with automatic service discovery and OpenTelemetry.
+    </Note>
+  </Step>
+  
+  <Step title="Install Docker">
+    Aspire uses Docker to run Postgres and Redis containers.
     
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    - **Windows/Mac:** [Docker Desktop](https://www.docker.com/products/docker-desktop)
+    - **Linux:** [Docker Engine](https://docs.docker.com/engine/install/)
+    
+    Verify Docker is running:
+    ```bash
+    docker ps
+    ```
+  </Step>
+</Steps>
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+## Run the API (Aspire)
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+From `src/README.md:27-33`:
 
-### Step 3: Go live
+<Steps>
+  <Step title="Restore Dependencies">
+    ```bash
+    cd src
+    dotnet restore FSH.Framework.slnx
+    ```
+    
+    This restores NuGet packages for all projects in the solution.
+  </Step>
+  
+  <Step title="Start Everything with Aspire">
+    ```bash
+    dotnet run --project Playground/FSH.Playground.AppHost
+    ```
+    
+    <Note>
+      Aspire brings up:
+      - **Postgres** container (port 5432) with automatic connection string injection
+      - **Redis** container (port 6379) for distributed caching
+      - **Playground.Api** (https://localhost:5285) with migrations applied
+      - **Playground.Blazor** (https://localhost:7030) - optional UI
+      - **Aspire Dashboard** (http://localhost:15888) for observability
+    </Note>
+    
+    Expected output:
+    ```
+info: Aspire.Hosting.DistributedApplication[0]
+      Aspire version: 10.0.0
+info: Aspire.Hosting.DistributedApplication[0]
+      Distributed application starting.
+info: Aspire.Hosting.DistributedApplication[0]
+      Application host directory is: /src/Playground/FSH.Playground.AppHost
+info: Aspire.Hosting.DistributedApplication[0]
+      Now listening on: http://localhost:15888
+info: Aspire.Hosting.DistributedApplication[0]
+      Login to the dashboard at http://localhost:15888
+    ```
+  </Step>
+  
+  <Step title="Verify API is Running">
+    Open your browser to **https://localhost:5285**
+    
+    You should see the Scalar API documentation interface.
+    
+    Or use curl:
+    ```bash
+    curl https://localhost:5285 -k
+    # Output: {"message":"hello world!"}
+    ```
+    
+    From `src/Playground/Playground.Api/Program.cs:66-68`:
+    ```csharp
+    app.MapGet("/", () => Results.Ok(new { message = "hello world!" }))
+       .WithTags("PlayGround")
+       .AllowAnonymous();
+    ```
+  </Step>
+</Steps>
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+## Explore the API
 
-## Next steps
+### Access Swagger/Scalar UI
 
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+Navigate to **https://localhost:5285/scalar/v1** in your browser.
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+  FullStackHero uses **Scalar** instead of Swagger UI for a modern, interactive API documentation experience.
 </Note>
+
+From `src/Playground/Playground.Api/appsettings.json:89-103`:
+
+```json Configuration
+"OpenApiOptions": {
+  "Enabled": true,
+  "Title": "FSH PlayGround API",
+  "Version": "v1",
+  "Description": "The FSH Starter Kit API for Modular/Multitenant Architecture.",
+  "Contact": {
+    "Name": "Mukesh Murugan",
+    "Url": "https://codewithmukesh.com",
+    "Email": "mukesh@codewithmukesh.com"
+  },
+  "License": {
+    "Name": "MIT License",
+    "Url": "https://opensource.org/licenses/MIT"
+  }
+}
+```
+
+### Available Modules
+
+<Tabs>
+  <Tab title="Identity Module">
+    **Endpoints under `/api/v1/identity`:**
+    
+    - `POST /api/v1/identity/token/issue` - Generate JWT tokens
+    - `POST /api/v1/identity/token/refresh` - Refresh expired tokens
+    - `GET /api/v1/identity/users/search` - Search users (requires auth)
+    - `POST /api/v1/identity/users/register` - Register new user
+    - `GET /api/v1/identity/roles` - List roles
+    - `GET /api/v1/identity/groups` - List user groups
+    
+    From `src/Modules/Identity/Modules.Identity/Features/v1/`
+  </Tab>
+  
+  <Tab title="Multitenancy Module">
+    **Endpoints under `/api/v1/multitenancy`:**
+    
+    - `GET /api/v1/multitenancy/tenants` - List tenants
+    - `POST /api/v1/multitenancy/tenants` - Create new tenant
+    - `GET /api/v1/multitenancy/tenants/{id}/status` - Get tenant status
+    - `PUT /api/v1/multitenancy/tenants/{id}/activate` - Activate tenant
+    - `GET /api/v1/multitenancy/tenants/{id}/theme` - Get tenant theme
+    
+    From `src/Modules/Multitenancy/Modules.Multitenancy/Features/v1/`
+  </Tab>
+  
+  <Tab title="Auditing Module">
+    **Endpoints under `/api/v1/auditing`:**
+    
+    - `GET /api/v1/auditing/audits` - Query audit logs
+    - `GET /api/v1/auditing/audits/summary` - Get audit summary
+    - `GET /api/v1/auditing/audits/security` - Security audit trail
+    - `GET /api/v1/auditing/audits/exceptions` - Exception logs
+    - `GET /api/v1/auditing/audits/trace/{traceId}` - Audits by trace ID
+    
+    From `src/Modules/Auditing/Modules.Auditing/Features/v1/`
+  </Tab>
+</Tabs>
+
+## Your First API Call
+
+### 1. Generate a JWT Token
+
+From `src/BuildingBlocks/Shared/Multitenancy/MultitenancyConstants.cs:9` and `:14`, the default admin credentials are:
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://localhost:5285/api/v1/identity/token/issue \
+  -H "Content-Type: application/json" \
+  -H "tenant: root" \
+  -d '{
+    "email": "admin@root.com",
+    "password": "123Pa$$word!"
+  }' \
+  -k
+```
+
+```powershell PowerShell
+$headers = @{
+    "Content-Type" = "application/json"
+    "tenant" = "root"
+}
+
+$body = @{
+    email = "admin@root.com"
+    password = "123Pa$$word!"
+} | ConvertTo-Json
+
+Invoke-RestMethod -Uri "https://localhost:5285/api/v1/identity/token/issue" `
+                  -Method Post `
+                  -Headers $headers `
+                  -Body $body `
+                  -SkipCertificateCheck
+```
+
+```javascript JavaScript (fetch)
+const response = await fetch('https://localhost:5285/api/v1/identity/token/issue', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'tenant': 'root'
+  },
+  body: JSON.stringify({
+    email: 'admin@root.com',
+    password: '123Pa$$word!'
+  })
+});
+
+const data = await response.json();
+console.log(data.accessToken);
+```
+</CodeGroup>
+
+**Expected Response:**
+
+```json
+{
+  "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "accessTokenExpiresAt": "2026-03-06T23:30:00Z",
+  "refreshToken": "CfDJ8K...",
+  "refreshTokenExpiresAt": "2026-03-13T21:30:00Z"
+}
+```
+
+From `src/Modules/Identity/Modules.Identity/Features/v1/Tokens/TokenGeneration/GenerateTokenEndpoint.cs:20-38`:
+
+<Accordion title="How token generation works">
+  From `src/Modules/Identity/Modules.Identity/Features/v1/Tokens/TokenGeneration/GenerateTokenCommandHandler.cs:60-92`:
+  
+  1. **Validate credentials** against ASP.NET Identity
+  2. **Audit login attempt** (success or failure)
+  3. **Issue JWT** with user claims (roles, permissions, tenant)
+  4. **Store refresh token** (hashed) for later use
+  5. **Create user session** for session management
+  6. **Audit token issuance** with fingerprint
+  7. **Enqueue integration event** for downstream systems
+  
+  All of this happens in `GenerateTokenCommandHandler.Handle()`.
+</Accordion>
+
+### 2. Call an Authenticated Endpoint
+
+Use the `accessToken` from step 1:
+
+<CodeGroup>
+```bash cURL
+curl -X GET https://localhost:5285/api/v1/identity/users/search \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -H "tenant: root" \
+  -k
+```
+
+```powershell PowerShell
+$headers = @{
+    "Authorization" = "Bearer YOUR_ACCESS_TOKEN"
+    "tenant" = "root"
+}
+
+Invoke-RestMethod -Uri "https://localhost:5285/api/v1/identity/users/search" `
+                  -Method Get `
+                  -Headers $headers `
+                  -SkipCertificateCheck
+```
+</CodeGroup>
+
+**Expected Response:**
+
+```json
+{
+  "data": [
+    {
+      "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "email": "admin@root.com",
+      "firstName": "Root",
+      "lastName": "Admin",
+      "isActive": true,
+      "emailConfirmed": true,
+      "roles": ["Admin"]
+    }
+  ],
+  "currentPage": 1,
+  "totalPages": 1,
+  "totalCount": 1,
+  "pageSize": 10
+}
+```
+
+From `src/Modules/Identity/Modules.Identity/Features/v1/Users/SearchUsers/SearchUsersEndpoint.cs:15-23`:
+
+```csharp How authorization works
+return endpoints.MapGet(
+        "/users/search",
+        async ([AsParameters] SearchUsersQuery query,
+               IMediator mediator,
+               CancellationToken cancellationToken) =>
+            await mediator.Send(query, cancellationToken))
+    .WithName("SearchUsers")
+    .WithSummary("Search users with pagination")
+    .RequirePermission(IdentityPermissionConstants.Users.View);  // <-- Requires permission
+```
+
+<Note>
+  Every protected endpoint uses `.RequirePermission()` for fine-grained authorization. This is enforced via a custom authorization filter.
+</Note>
+
+### 3. Check API Health
+
+```bash
+curl https://localhost:5285/health -k
+```
+
+**Expected Response:**
+
+```json
+{
+  "status": "Healthy",
+  "checks": [
+    {
+      "name": "self",
+      "status": "Healthy",
+      "description": null,
+      "data": {}
+    }
+  ],
+  "totalDuration": "00:00:00.0012345"
+}
+```
+
+From `src/BuildingBlocks/Web/Extensions.cs:63`:
+
+```csharp Health check registration
+builder.Services.AddHealthChecks()
+    .AddCheck("self", () => HealthCheckResult.Healthy());
+```
+
+## Understanding the Configuration
+
+From `src/Playground/Playground.Api/appsettings.json`:
+
+<Tabs>
+  <Tab title="Database">
+    ```json Line 66-70
+    "DatabaseOptions": {
+      "Provider": "POSTGRESQL",
+      "ConnectionString": "Server=localhost;Database=fsh;User Id=postgres;Password=password",
+      "MigrationsAssembly": "FSH.Playground.Migrations.PostgreSQL"
+    }
+    ```
+    
+    **When using Aspire**, the connection string is injected automatically from the Postgres container.
+    
+    From `src/Playground/FSH.Playground.AppHost/AppHost.cs:4` and `:14-15`:
+    ```csharp
+    var postgres = builder.AddPostgres("postgres")
+        .WithDataVolume("fsh-postgres-data")
+        .AddDatabase("fsh");
+    
+    builder.AddProject<Projects.Playground_Api>("playground-api")
+        .WithReference(postgres)  // Auto-injects connection string
+        .WithEnvironment("DatabaseOptions__Provider", "POSTGRESQL")
+        .WithEnvironment("DatabaseOptions__ConnectionString",
+                        postgres.Resource.ConnectionStringExpression)
+    ```
+  </Tab>
+  
+  <Tab title="JWT">
+    ```json Line 113-119
+    "JwtOptions": {
+      "Issuer": "fsh.local",
+      "Audience": "fsh.clients",
+      "SigningKey": "replace-with-256-bit-secret-min-32-chars",
+      "AccessTokenMinutes": 2,
+      "RefreshTokenDays": 7
+    }
+    ```
+    
+    <Warning>
+      In production, set `JwtOptions:SigningKey` via environment variable or Azure Key Vault. Never commit secrets to source control.
+    </Warning>
+    
+    From `src/Playground/Playground.Api/Program.cs:14-28`, the API requires these in production:
+    ```csharp
+    if (builder.Environment.IsProduction())
+    {
+        static void Require(IConfiguration config, string key)
+        {
+            if (string.IsNullOrWhiteSpace(config[key]))
+            {
+                throw new InvalidOperationException(
+                    $"Missing required configuration '{key}' in Production.");
+            }
+        }
+    
+        var config = builder.Configuration;
+        Require(config, "DatabaseOptions:ConnectionString");
+        Require(config, "CachingOptions:Redis");
+        Require(config, "JwtOptions:SigningKey");
+    }
+    ```
+  </Tab>
+  
+  <Tab title="Multi-Tenancy">
+    ```json Line 156-158
+    "MultitenancyOptions": {
+      "RunTenantMigrationsOnStartup": true
+    }
+    ```
+    
+    When `true`, the API automatically runs migrations for all active tenants on startup.
+    
+    From `src/Playground/Playground.Api/Program.cs:59`:
+    ```csharp
+    app.UseHeroMultiTenantDatabases();  // Applies migrations
+    ```
+    
+    <Note>
+      In production, set `RunTenantMigrationsOnStartup: false` and run migrations via a deployment script or the CLI tool.
+    </Note>
+  </Tab>
+  
+  <Tab title="OpenTelemetry">
+    ```json Line 2-28
+    "OpenTelemetryOptions": {
+      "Enabled": true,
+      "Tracing": { "Enabled": true },
+      "Metrics": {
+        "Enabled": true,
+        "MeterNames": [
+          "FSH.Modules.Identity",
+          "FSH.Modules.Multitenancy",
+          "FSH.Modules.Auditing"
+        ]
+      },
+      "Exporter": {
+        "Otlp": {
+          "Enabled": true,
+          "Endpoint": "http://localhost:4317",
+          "Protocol": "grpc"
+        }
+      },
+      "Jobs": { "Enabled": true },
+      "Mediator": { "Enabled": true },
+      "Http": { "Histograms": { "Enabled": true } },
+      "Data": {
+        "FilterEfStatements": true,
+        "FilterRedisCommands": true
+      }
+    }
+    ```
+    
+    Traces, metrics, and logs are exported to the Aspire dashboard at **http://localhost:15888**.
+    
+    <Card title="View Telemetry" icon="chart-line">
+      Open http://localhost:15888 to see:
+      - Request traces with timing breakdowns
+      - SQL query performance
+      - Redis command latency
+      - Mediator command/query execution
+      - Hangfire job execution
+    </Card>
+  </Tab>
+</Tabs>
+
+## Run Without Aspire (API Only)
+
+If you want to run just the API without Aspire orchestration:
+
+<Steps>
+  <Step title="Start Postgres and Redis">
+    ```bash
+    docker run -d --name fsh-postgres \
+      -e POSTGRES_PASSWORD=password \
+      -e POSTGRES_DB=fsh \
+      -p 5432:5432 \
+      postgres:16
+    
+    docker run -d --name fsh-redis \
+      -p 6379:6379 \
+      redis:7-alpine
+    ```
+  </Step>
+  
+  <Step title="Update appsettings.Development.json">
+    Ensure connection strings point to your local containers:
+    
+    ```json
+    {
+      "DatabaseOptions": {
+        "ConnectionString": "Server=localhost;Database=fsh;User Id=postgres;Password=password"
+      },
+      "CachingOptions": {
+        "Redis": "localhost:6379"
+      }
+    }
+    ```
+  </Step>
+  
+  <Step title="Run the API">
+    ```bash
+    dotnet run --project src/Playground/Playground.Api
+    ```
+    
+    From `src/Playground/Playground.Api/Program.cs:59` and `:38`, the host:
+    - Applies migrations via `UseHeroMultiTenantDatabases()`
+    - Maps module endpoints via `UseHeroPlatform(p => p.MapModules = true)`
+    
+    ```csharp
+    app.UseHeroMultiTenantDatabases();
+    app.UseHeroPlatform(p =>
+    {
+        p.MapModules = true;
+        p.ServeStaticFiles = true;
+    });
+    ```
+  </Step>
+</Steps>
+
+## Access Background Jobs Dashboard
+
+Hangfire dashboard is available at **https://localhost:5285/jobs**
+
+From `src/Playground/Playground.Api/appsettings.json:77-81`:
+
+```json
+"HangfireOptions": {
+  "Username": "admin",
+  "Password": "Secure1234!Me",
+  "Route": "/jobs"
+}
+```
+
+<Warning>
+  Change the default credentials in production via environment variables.
+</Warning>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Add Your First Feature" icon="plus" href="/modules/creating-modules">
+    Learn the vertical slice pattern: Command → Handler → Validator → Endpoint
+  </Card>
+  
+  <Card title="Understand Modules" icon="puzzle-piece" href="/modules/overview">
+    Explore Identity, Multitenancy, and Auditing modules
+  </Card>
+  
+  <Card title="Configure Multi-Tenancy" icon="users" href="/modules/multitenancy">
+    Set up tenant isolation and provisioning
+  </Card>
+  
+  <Card title="Deploy to Production" icon="cloud" href="/deployment/overview">
+    Deploy to Azure, AWS, or Kubernetes
+  </Card>
+</CardGroup>
+
+## Common Issues
+
+<AccordionGroup>
+  <Accordion title="Port 5432 or 6379 already in use">
+    Stop conflicting containers:
+    ```bash
+    docker stop $(docker ps -q --filter "publish=5432")
+    docker stop $(docker ps -q --filter "publish=6379")
+    ```
+    
+    Or change ports in `AppHost.cs`:
+    ```csharp
+    var postgres = builder.AddPostgres("postgres")
+        .WithEndpoint(port: 5433)  // Custom port
+        .AddDatabase("fsh");
+    ```
+  </Accordion>
+  
+  <Accordion title="Certificate validation errors">
+    Use `-k` flag with curl or set `DOTNET_SYSTEM_NET_HTTP_SOCKETSHTTPHANDLER_ALLOWALL=1`
+    
+    For production, configure proper SSL certificates:
+    ```bash
+    dotnet dev-certs https --trust
+    ```
+  </Accordion>
+  
+  <Accordion title="Migrations not applied">
+    Manually apply migrations:
+    ```bash
+    dotnet ef database update --project src/Playground/Migrations.PostgreSQL
+    ```
+    
+    Or set `MultitenancyOptions:RunTenantMigrationsOnStartup: true` in appsettings.
+  </Accordion>
+  
+  <Accordion title="401 Unauthorized on protected endpoints">
+    1. Verify you included the `Authorization: Bearer <token>` header
+    2. Check token hasn't expired (default: 2 minutes for access tokens)
+    3. Ensure you're passing the correct `tenant` header
+    4. Confirm user has the required permission (check role assignments)
+  </Accordion>
+</AccordionGroup>
+
+## What Just Happened?
+
+From `src/Playground/Playground.Api/Program.cs:30-56`, when you ran the API:
+
+<Steps>
+  <Step title="Registered Mediator">
+    All command/query handlers from Identity, Multitenancy, and Auditing modules
+    
+    ```csharp Line 30-40
+    builder.Services.AddMediator(o =>
+    {
+        o.ServiceLifetime = ServiceLifetime.Scoped;
+        o.Assemblies = [
+            typeof(GenerateTokenCommand),
+            typeof(GenerateTokenCommandHandler),
+            typeof(GetTenantStatusQuery),
+            typeof(GetTenantStatusQueryHandler),
+            typeof(FSH.Modules.Auditing.Contracts.AuditEnvelope),
+            typeof(FSH.Modules.Auditing.Persistence.AuditDbContext)];
+    });
+    ```
+  </Step>
+  
+  <Step title="Registered Hero Platform">
+    Caching, Mailing, Jobs, OpenTelemetry, Health Checks, Authentication, Authorization, Rate Limiting
+    
+    ```csharp Line 49-54
+    builder.AddHeroPlatform(o =>
+    {
+        o.EnableCaching = true;
+        o.EnableMailing = true;
+        o.EnableJobs = true;
+    });
+    ```
+    
+    From `src/BuildingBlocks/Web/Extensions.cs:29-87`, this wires 11 building blocks.
+  </Step>
+  
+  <Step title="Registered Modules">
+    Identity, Multitenancy, and Auditing modules with their DbContexts and endpoints
+    
+    ```csharp Line 42-56
+    var moduleAssemblies = new Assembly[]
+    {
+        typeof(IdentityModule).Assembly,
+        typeof(MultitenancyModule).Assembly,
+        typeof(AuditingModule).Assembly
+    };
+    
+    builder.AddModules(moduleAssemblies);
+    ```
+  </Step>
+  
+  <Step title="Applied Tenant Migrations">
+    EF Core migrations for all active tenants
+    
+    ```csharp Line 59
+    app.UseHeroMultiTenantDatabases();
+    ```
+  </Step>
+  
+  <Step title="Mapped Module Endpoints">
+    All endpoints from Identity, Multitenancy, and Auditing modules under `/api/v1/`
+    
+    ```csharp Line 60-64
+    app.UseHeroPlatform(p =>
+    {
+        p.MapModules = true;
+        p.ServeStaticFiles = true;
+    });
+    ```
+  </Step>
+</Steps>
+
+<Card title="Ready to Build?" icon="code" href="/modules/creating-modules">
+  Learn how to add your first feature using the vertical slice pattern
+</Card>

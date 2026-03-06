@@ -1,122 +1,153 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "FullStackHero .NET Starter Kit",
+  "theme": "linden",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#6ec28c",
+    "light": "#e0f2e4",
+    "dark": "#49516d"
   },
-  "favicon": "/favicon.svg",
+  "favicon": "https://media.brand.dev/23bfb34e-f8d7-4bb4-9259-2c1ff3e407c6.png",
+  "logo": {
+    "light": "https://media.brand.dev/23bfb34e-f8d7-4bb4-9259-2c1ff3e407c6.png",
+    "dark": "https://media.brand.dev/23bfb34e-f8d7-4bb4-9259-2c1ff3e407c6.png"
+  },
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/fullstackhero/dotnet-starter-kit"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/fullstackhero/dotnet-starter-kit"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Overview",
             "pages": [
-              "index",
-              "quickstart",
-              "development"
+              "introduction",
+              "why-fullstackhero",
+              "quickstart"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Getting Started",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "getting-started/installation",
+              "getting-started/aspire-setup",
+              "getting-started/configuration",
+              "getting-started/project-structure"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "Architecture",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
+              "architecture/overview",
+              "architecture/modular-monolith",
+              "architecture/vertical-slices",
+              "architecture/cqrs-mediator",
+              "architecture/domain-driven-design",
+              "architecture/multitenancy"
             ]
           },
           {
-            "group": "AI tools",
+            "group": "Building Blocks",
             "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "building-blocks/overview",
+              "building-blocks/core",
+              "building-blocks/persistence",
+              "building-blocks/caching",
+              "building-blocks/mailing",
+              "building-blocks/jobs",
+              "building-blocks/storage",
+              "building-blocks/eventing",
+              "building-blocks/web"
+            ]
+          },
+          {
+            "group": "Modules",
+            "pages": [
+              "modules/overview",
+              "modules/identity",
+              "modules/multitenancy",
+              "modules/auditing",
+              "modules/creating-modules"
+            ]
+          },
+          {
+            "group": "Development Guide",
+            "pages": [
+              "development/creating-features",
+              "development/commands-queries",
+              "development/endpoints",
+              "development/validation",
+              "development/permissions",
+              "development/database-migrations",
+              "development/testing"
+            ]
+          },
+          {
+            "group": "Features",
+            "pages": [
+              "features/authentication",
+              "features/authorization",
+              "features/multi-tenancy",
+              "features/rate-limiting",
+              "features/api-versioning",
+              "features/observability",
+              "features/health-checks",
+              "features/background-jobs"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/overview",
+              "deployment/docker",
+              "deployment/aws",
+              "deployment/configuration-management"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "API Reference",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Identity API",
             "pages": [
-              "api-reference/introduction"
+              "api/identity/authentication",
+              "api/identity/users",
+              "api/identity/roles",
+              "api/identity/permissions",
+              "api/identity/groups",
+              "api/identity/sessions"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Multitenancy API",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "api/multitenancy/tenants",
+              "api/multitenancy/tenant-status",
+              "api/multitenancy/migrations"
+            ]
+          },
+          {
+            "group": "Auditing API",
+            "pages": [
+              "api/auditing/security-logs",
+              "api/auditing/activity-logs",
+              "api/auditing/exception-logs"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

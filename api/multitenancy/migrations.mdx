@@ -1,0 +1,189 @@
+---
+title: Tenant Migrations
+description: Check database migration status for all tenants
+---
+
+## Get Tenant Migrations
+
+Retrieve migration status for all tenants, showing pending migrations and database provider information.
+
+<CodeGroup>
+```http GET /api/v1/tenants/migrations
+GET /api/v1/tenants/migrations
+```
+
+```bash cURL
+curl -X GET 'https://api.example.com/api/v1/tenants/migrations' \
+  -H 'Authorization: Bearer {token}'
+```
+
+```csharp C#
+var query = new GetTenantMigrationsQuery();
+var migrations = await mediator.Send(query, cancellationToken);
+```
+</CodeGroup>
+
+### Authorization
+
+Requires `Permissions.Multitenancy.View` permission.
+
+### Response
+
+Returns an array of tenant migration status objects.
+
+<ResponseField name="tenantId" type="string">
+  Unique tenant identifier
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  Tenant display name
+</ResponseField>
+
+<ResponseField name="isActive" type="boolean">
+  Whether the tenant is currently active
+</ResponseField>
+
+<ResponseField name="validUpto" type="datetime" nullable>
+  Subscription expiration date
+</ResponseField>
+
+<ResponseField name="hasPendingMigrations" type="boolean">
+  Whether there are unapplied database migrations
+</ResponseField>
+
+<ResponseField name="provider" type="string" nullable>
+  Database provider (e.g., "PostgreSQL", "SqlServer", "MySql")
+</ResponseField>
+
+<ResponseField name="lastAppliedMigration" type="string" nullable>
+  Name of the most recently applied migration
+</ResponseField>
+
+<ResponseField name="pendingMigrations" type="array">
+  List of migration names that have not been applied
+</ResponseField>
+
+<ResponseField name="error" type="string" nullable>
+  Error message if migration status check failed
+</ResponseField>
+
+<ResponseExample>
+```json 200 Success
+[
+  {
+    "tenantId": "root",
+    "name": "Root Tenant",
+    "isActive": true,
+    "validUpto": "2026-12-31T23:59:59Z",
+    "hasPendingMigrations": false,
+    "provider": "PostgreSQL",
+    "lastAppliedMigration": "20260301_AddAuditingModule",
+    "pendingMigrations": [],
+    "error": null
+  },
+  {
+    "tenantId": "acme-corp",
+    "name": "Acme Corporation",
+    "isActive": true,
+    "validUpto": "2026-06-30T23:59:59Z",
+    "hasPendingMigrations": true,
+    "provider": "SqlServer",
+    "lastAppliedMigration": "20260201_InitialCreate",
+    "pendingMigrations": [
+      "20260215_AddIdentityModule",
+      "20260301_AddAuditingModule"
+    ],
+    "error": null
+  },
+  {
+    "tenantId": "broken-tenant",
+    "name": "Broken Tenant",
+    "isActive": false,
+    "validUpto": "2025-12-31T23:59:59Z",
+    "hasPendingMigrations": false,
+    "provider": null,
+    "lastAppliedMigration": null,
+    "pendingMigrations": [],
+    "error": "Failed to connect to database: Connection timeout"
+  }
+]
+```
+</ResponseExample>
+
+## Understanding Migration Status
+
+### No Pending Migrations
+
+When `hasPendingMigrations` is `false`, the tenant's database is up to date:
+
+```json
+{
+  "tenantId": "root",
+  "hasPendingMigrations": false,
+  "lastAppliedMigration": "20260301_AddAuditingModule",
+  "pendingMigrations": []
+}
+```
+
+### Pending Migrations
+
+When `hasPendingMigrations` is `true`, the tenant needs database updates:
+
+```json
+{
+  "tenantId": "acme-corp",
+  "hasPendingMigrations": true,
+  "lastAppliedMigration": "20260201_InitialCreate",
+  "pendingMigrations": [
+    "20260215_AddIdentityModule",
+    "20260301_AddAuditingModule"
+  ]
+}
+```
+
+<Warning>
+  Tenants with pending migrations may experience issues with new features. Apply migrations promptly.
+</Warning>
+
+### Migration Errors
+
+If migration status cannot be determined, the `error` field contains details:
+
+```json
+{
+  "tenantId": "broken-tenant",
+  "hasPendingMigrations": false,
+  "error": "Failed to connect to database: Connection timeout"
+}
+```
+
+## Use Cases
+
+### Health Monitoring
+
+Use this endpoint to monitor database health across all tenants:
+
+- Identify tenants with pending migrations
+- Detect database connection issues
+- Verify migration deployment success
+
+### Pre-Deployment Checks
+
+Before deploying new application versions:
+
+1. Check for pending migrations
+2. Apply migrations to test tenants first
+3. Monitor for errors
+4. Roll out to production tenants
+
+### Multi-Database Support
+
+The `provider` field helps manage heterogeneous database environments:
+
+- Track which tenants use which database providers
+- Target provider-specific optimizations
+- Plan database upgrades
+
+<Info>
+  This endpoint queries all tenant databases. Response time may increase with large numbers of tenants.
+</Info>

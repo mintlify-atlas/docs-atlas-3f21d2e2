@@ -1,0 +1,821 @@
+---
+title: 'Creating Custom Modules'
+description: 'Step-by-step guide to building your own modules'
+icon: 'plus'
+---
+
+## Overview
+
+This guide walks you through creating a custom module from scratch. You'll learn the module structure, how to implement the `IModule` interface, configure services, and map endpoints.
+
+## Module Structure
+
+A well-organized module follows this structure:
+
+```
+src/Modules/{ModuleName}/
+├── Modules.{ModuleName}/
+│   ├── AssemblyInfo.cs              # [FshModule] attribute
+│   ├── {ModuleName}Module.cs        # IModule implementation
+│   ├── Domain/                      # Entities, value objects, aggregates
+│   ├── Data/                        # DbContext, configurations, migrations
+│   ├── Features/v1/                 # Vertical slices (CQRS)
+│   │   └── {Feature}/
+│   │       ├── {Action}Command.cs
+│   │       ├── {Action}Handler.cs
+│   │       ├── {Action}Validator.cs
+│   │       └── {Action}Endpoint.cs
+│   └── Services/                    # Domain services
+└── Modules.{ModuleName}.Contracts/  # DTOs, interfaces for external use
+```
+
+## Step-by-Step Guide
+
+<Steps>
+  <Step title="Create Module Projects">
+    Create the main module and contracts projects:
+    
+    ```bash
+    cd src/Modules
+    mkdir Catalog
+    cd Catalog
+    
+    dotnet new classlib -n Modules.Catalog
+    dotnet new classlib -n Modules.Catalog.Contracts
+    ```
+  </Step>
+  
+  <Step title="Add Project References">
+    Reference the framework and required packages:
+    
+    ```bash
+    cd Modules.Catalog
+    
+    # Framework references
+    dotnet add reference ../../BuildingBlocks/Core/FSH.Framework.Core.csproj
+    dotnet add reference ../../BuildingBlocks/Web/FSH.Framework.Web.csproj
+    dotnet add reference ../../BuildingBlocks/Persistence/FSH.Framework.Persistence.csproj
+    
+    # Contracts reference
+    dotnet add reference ../Modules.Catalog.Contracts/Modules.Catalog.Contracts.csproj
+    
+    # NuGet packages
+    dotnet add package Mediator.Abstractions
+    dotnet add package FluentValidation
+    dotnet add package Microsoft.EntityFrameworkCore
+    dotnet add package Asp.Versioning.Http
+    ```
+  </Step>
+  
+  <Step title="Define Domain Entity">
+    Create your first entity in `Domain/Product.cs`:
+    
+    ```csharp
+    using FSH.Framework.Core.Domain;
+    using FSH.Framework.Core.Domain.Contracts;
+    
+    namespace FSH.Modules.Catalog.Domain;
+    
+    public class Product : AuditableEntity, IAggregateRoot
+    {
+        public string Name { get; private set; } = default!;
+        public string? Description { get; private set; }
+        public decimal Price { get; private set; }
+        public int StockQuantity { get; private set; }
+        public string? ImageUrl { get; private set; }
+        public bool IsActive { get; private set; } = true;
+        
+        // Private constructor for EF Core
+        private Product() { }
+        
+        // Factory method
+        public static Product Create(
+            string name,
+            string? description,
+            decimal price,
+            int stockQuantity,
+            string? imageUrl = null)
+        {
+            var product = new Product
+            {
+                Id = Guid.CreateVersion7(),
+                Name = name,
+                Description = description,
+                Price = price,
+                StockQuantity = stockQuantity,
+                ImageUrl = imageUrl
+            };
+            
+            return product;
+        }
+        
+        public void Update(string name, string? description, decimal price)
+        {
+            Name = name;
+            Description = description;
+            Price = price;
+        }
+        
+        public void UpdateStock(int quantity)
+        {
+            StockQuantity = quantity;
+        }
+        
+        public void Deactivate() => IsActive = false;
+        public void Activate() => IsActive = true;
+    }
+    ```
+  </Step>
+  
+  <Step title="Create DbContext">
+    Define the database context in `Data/CatalogDbContext.cs`:
+    
+    ```csharp
+    using FSH.Framework.Persistence;
+    using FSH.Modules.Catalog.Domain;
+    using Microsoft.EntityFrameworkCore;
+    
+    namespace FSH.Modules.Catalog.Data;
+    
+    public class CatalogDbContext : FshDbContext
+    {
+        public CatalogDbContext(DbContextOptions<CatalogDbContext> options)
+            : base(options)
+        {
+        }
+        
+        public DbSet<Product> Products => Set<Product>();
+        
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            base.OnModelCreating(modelBuilder);
+            
+            modelBuilder.HasDefaultSchema("catalog");
+            modelBuilder.ApplyConfigurationsFromAssembly(GetType().Assembly);
+        }
+    }
+    ```
+  </Step>
+  
+  <Step title="Configure Entity">
+    Create entity configuration in `Data/Configurations/ProductConfiguration.cs`:
+    
+    ```csharp
+    using FSH.Modules.Catalog.Domain;
+    using Microsoft.EntityFrameworkCore;
+    using Microsoft.EntityFrameworkCore.Metadata.Builders;
+    
+    namespace FSH.Modules.Catalog.Data.Configurations;
+    
+    public class ProductConfiguration : IEntityTypeConfiguration<Product>
+    {
+        public void Configure(EntityTypeBuilder<Product> builder)
+        {
+            builder.ToTable("Products");
+            
+            builder.HasKey(p => p.Id);
+            
+            builder.Property(p => p.Name)
+                .IsRequired()
+                .HasMaxLength(200);
+            
+            builder.Property(p => p.Description)
+                .HasMaxLength(2000);
+            
+            builder.Property(p => p.Price)
+                .IsRequired()
+                .HasPrecision(18, 2);
+            
+            builder.Property(p => p.ImageUrl)
+                .HasMaxLength(500);
+            
+            builder.HasIndex(p => p.Name);
+            builder.HasIndex(p => p.IsActive);
+        }
+    }
+    ```
+  </Step>
+  
+  <Step title="Create a Feature (CQRS)">
+    Implement a complete feature in `Features/v1/CreateProduct/`:
+    
+    **Command** (`CreateProductCommand.cs`):
+    ```csharp
+    using Mediator;
+    
+    namespace FSH.Modules.Catalog.Features.v1.CreateProduct;
+    
+    public sealed record CreateProductCommand(
+        string Name,
+        string? Description,
+        decimal Price,
+        int StockQuantity,
+        string? ImageUrl = null) : ICommand<Guid>;
+    ```
+    
+    **Handler** (`CreateProductCommandHandler.cs`):
+    ```csharp
+    using FSH.Framework.Core.Persistence;
+    using FSH.Modules.Catalog.Domain;
+    using Mediator;
+    
+    namespace FSH.Modules.Catalog.Features.v1.CreateProduct;
+    
+    public sealed class CreateProductCommandHandler : ICommandHandler<CreateProductCommand, Guid>
+    {
+        private readonly IRepository<Product> _repository;
+        
+        public CreateProductCommandHandler(IRepository<Product> repository)
+        {
+            _repository = repository;
+        }
+        
+        public async ValueTask<Guid> Handle(CreateProductCommand command, CancellationToken cancellationToken)
+        {
+            var product = Product.Create(
+                name: command.Name,
+                description: command.Description,
+                price: command.Price,
+                stockQuantity: command.StockQuantity,
+                imageUrl: command.ImageUrl);
+            
+            await _repository.AddAsync(product, cancellationToken);
+            
+            return product.Id;
+        }
+    }
+    ```
+    
+    **Validator** (`CreateProductCommandValidator.cs`):
+    ```csharp
+    using FluentValidation;
+    
+    namespace FSH.Modules.Catalog.Features.v1.CreateProduct;
+    
+    public sealed class CreateProductCommandValidator : AbstractValidator<CreateProductCommand>
+    {
+        public CreateProductCommandValidator()
+        {
+            RuleFor(x => x.Name)
+                .NotEmpty()
+                .MaximumLength(200);
+            
+            RuleFor(x => x.Description)
+                .MaximumLength(2000);
+            
+            RuleFor(x => x.Price)
+                .GreaterThan(0)
+                .WithMessage("Price must be greater than zero");
+            
+            RuleFor(x => x.StockQuantity)
+                .GreaterThanOrEqualTo(0)
+                .WithMessage("Stock quantity cannot be negative");
+        }
+    }
+    ```
+    
+    **Endpoint** (`CreateProductEndpoint.cs`):
+    ```csharp
+    using Mediator;
+    using Microsoft.AspNetCore.Builder;
+    using Microsoft.AspNetCore.Http;
+    using Microsoft.AspNetCore.Mvc;
+    using Microsoft.AspNetCore.Routing;
+    
+    namespace FSH.Modules.Catalog.Features.v1.CreateProduct;
+    
+    public static class CreateProductEndpoint
+    {
+        public static RouteHandlerBuilder Map(this IEndpointRouteBuilder endpoints)
+        {
+            return endpoints.MapPost("/", async (
+                [FromBody] CreateProductCommand command,
+                [FromServices] IMediator mediator,
+                CancellationToken cancellationToken) =>
+            {
+                var productId = await mediator.Send(command, cancellationToken);
+                return TypedResults.Created($"/api/v1/products/{productId}", new { id = productId });
+            })
+            .WithName("CreateProduct")
+            .WithSummary("Create a new product")
+            .WithDescription("Creates a new product in the catalog.")
+            .RequirePermission("Permissions.Catalog.Products.Create")
+            .Produces<Guid>(StatusCodes.Status201Created)
+            .ProducesValidationProblem();
+        }
+    }
+    ```
+  </Step>
+  
+  <Step title="Implement IModule">
+    Create the module class in `CatalogModule.cs`:
+    
+    ```csharp
+    using Asp.Versioning;
+    using FSH.Framework.Persistence;
+    using FSH.Framework.Web.Modules;
+    using FSH.Modules.Catalog.Data;
+    using FSH.Modules.Catalog.Features.v1.CreateProduct;
+    using Microsoft.AspNetCore.Builder;
+    using Microsoft.AspNetCore.Http;
+    using Microsoft.AspNetCore.Routing;
+    using Microsoft.Extensions.DependencyInjection;
+    using Microsoft.Extensions.Diagnostics.HealthChecks;
+    using Microsoft.Extensions.Hosting;
+    
+    namespace FSH.Modules.Catalog;
+    
+    public class CatalogModule : IModule
+    {
+        public void ConfigureServices(IHostApplicationBuilder builder)
+        {
+            ArgumentNullException.ThrowIfNull(builder);
+            
+            // Database
+            builder.Services.AddHeroDbContext<CatalogDbContext>();
+            
+            // Domain services (if any)
+            // builder.Services.AddScoped<IProductService, ProductService>();
+            
+            // Health checks
+            builder.Services.AddHealthChecks()
+                .AddDbContextCheck<CatalogDbContext>(
+                    name: "db:catalog",
+                    failureStatus: HealthStatus.Unhealthy);
+        }
+        
+        public void MapEndpoints(IEndpointRouteBuilder endpoints)
+        {
+            ArgumentNullException.ThrowIfNull(endpoints);
+            
+            var apiVersionSet = endpoints.NewApiVersionSet()
+                .HasApiVersion(new ApiVersion(1))
+                .ReportApiVersions()
+                .Build();
+            
+            var group = endpoints
+                .MapGroup("api/v{version:apiVersion}/products")
+                .WithTags("Products")
+                .WithApiVersionSet(apiVersionSet);
+            
+            // Map endpoints
+            CreateProductEndpoint.Map(group);
+            // GetProductsEndpoint.Map(group);
+            // GetProductByIdEndpoint.Map(group);
+            // UpdateProductEndpoint.Map(group);
+            // DeleteProductEndpoint.Map(group);
+        }
+    }
+    ```
+  </Step>
+  
+  <Step title="Register Module">
+    Add the `FshModule` attribute in `AssemblyInfo.cs`:
+    
+    ```csharp
+    using FSH.Framework.Web.Modules;
+    using FSH.Modules.Catalog;
+    
+    [assembly: FshModule(typeof(CatalogModule), order: 400)]
+    ```
+    
+    <Note>
+      Choose an order value higher than core modules (Identity: 100, Multitenancy: 200, Auditing: 300).
+    </Note>
+  </Step>
+  
+  <Step title="Load Module in Application">
+    Update `Program.cs` to include the new module:
+    
+    ```csharp
+    using FSH.Modules.Catalog;
+    
+    var moduleAssemblies = new Assembly[]
+    {
+        typeof(IdentityModule).Assembly,
+        typeof(MultitenancyModule).Assembly,
+        typeof(AuditingModule).Assembly,
+        typeof(CatalogModule).Assembly  // Add your module
+    };
+    
+    builder.AddModules(moduleAssemblies);
+    ```
+  </Step>
+  
+  <Step title="Create and Apply Migration">
+    Generate EF Core migration:
+    
+    ```bash
+    cd src/Modules/Catalog/Modules.Catalog
+    
+    dotnet ef migrations add InitialCreate \
+      --context CatalogDbContext \
+      --output-dir Data/Migrations
+    ```
+    
+    The migration will be applied automatically on startup by the `HeroPlatform` infrastructure.
+  </Step>
+</Steps>
+
+## Adding More Features
+
+Follow the same CQRS pattern for additional features:
+
+<CodeGroup>
+```csharp Query Example
+// GetProductsQuery.cs
+public sealed record GetProductsQuery(
+    int PageNumber = 1,
+    int PageSize = 10) : IQuery<PagedList<ProductDto>>;
+
+// GetProductsQueryHandler.cs
+public sealed class GetProductsQueryHandler : IQueryHandler<GetProductsQuery, PagedList<ProductDto>>
+{
+    private readonly IReadRepository<Product> _repository;
+    
+    public GetProductsQueryHandler(IReadRepository<Product> repository)
+    {
+        _repository = repository;
+    }
+    
+    public async ValueTask<PagedList<ProductDto>> Handle(
+        GetProductsQuery query,
+        CancellationToken cancellationToken)
+    {
+        var spec = new ProductsByActiveStatusSpec(isActive: true);
+        
+        return await _repository.ListAsync(
+            spec,
+            query.PageNumber,
+            query.PageSize,
+            cancellationToken);
+    }
+}
+
+// GetProductsEndpoint.cs
+public static RouteHandlerBuilder Map(this IEndpointRouteBuilder endpoints)
+{
+    return endpoints.MapGet("/", async (
+        [AsParameters] GetProductsQuery query,
+        [FromServices] IMediator mediator,
+        CancellationToken cancellationToken) =>
+    {
+        var result = await mediator.Send(query, cancellationToken);
+        return TypedResults.Ok(result);
+    })
+    .WithName("GetProducts")
+    .WithSummary("List products")
+    .RequirePermission("Permissions.Catalog.Products.View");
+}
+```
+
+```csharp Update Command
+// UpdateProductCommand.cs
+public sealed record UpdateProductCommand(
+    Guid Id,
+    string Name,
+    string? Description,
+    decimal Price) : ICommand;
+
+// UpdateProductCommandHandler.cs
+public sealed class UpdateProductCommandHandler : ICommandHandler<UpdateProductCommand>
+{
+    private readonly IRepository<Product> _repository;
+    
+    public UpdateProductCommandHandler(IRepository<Product> repository)
+    {
+        _repository = repository;
+    }
+    
+    public async ValueTask<Unit> Handle(
+        UpdateProductCommand command,
+        CancellationToken cancellationToken)
+    {
+        var product = await _repository.GetByIdAsync(command.Id, cancellationToken)
+            ?? throw new NotFoundException("Product not found");
+        
+        product.Update(
+            name: command.Name,
+            description: command.Description,
+            price: command.Price);
+        
+        await _repository.UpdateAsync(product, cancellationToken);
+        
+        return Unit.Value;
+    }
+}
+
+// UpdateProductEndpoint.cs
+public static RouteHandlerBuilder Map(this IEndpointRouteBuilder endpoints)
+{
+    return endpoints.MapPut("/{id:guid}", async (
+        [FromRoute] Guid id,
+        [FromBody] UpdateProductRequest request,
+        [FromServices] IMediator mediator,
+        CancellationToken cancellationToken) =>
+    {
+        var command = new UpdateProductCommand(
+            id,
+            request.Name,
+            request.Description,
+            request.Price);
+        
+        await mediator.Send(command, cancellationToken);
+        return TypedResults.NoContent();
+    })
+    .WithName("UpdateProduct")
+    .WithSummary("Update product")
+    .RequirePermission("Permissions.Catalog.Products.Update");
+}
+```
+</CodeGroup>
+
+## Specifications Pattern
+
+Use specifications for reusable query logic:
+
+```csharp
+using Ardalis.Specification;
+using FSH.Modules.Catalog.Domain;
+
+namespace FSH.Modules.Catalog.Specifications;
+
+public sealed class ProductsByActiveStatusSpec : Specification<Product>
+{
+    public ProductsByActiveStatusSpec(bool isActive)
+    {
+        Query.Where(p => p.IsActive == isActive);
+        Query.OrderBy(p => p.Name);
+    }
+}
+
+public sealed class ProductByIdSpec : Specification<Product>, ISingleResultSpecification<Product>
+{
+    public ProductByIdSpec(Guid id)
+    {
+        Query.Where(p => p.Id == id);
+    }
+}
+```
+
+## Domain Services
+
+For complex business logic, create domain services:
+
+```csharp
+namespace FSH.Modules.Catalog.Services;
+
+public interface IInventoryService
+{
+    Task<bool> CheckStockAsync(Guid productId, int quantity, CancellationToken cancellationToken);
+    Task ReserveStockAsync(Guid productId, int quantity, CancellationToken cancellationToken);
+    Task ReleaseStockAsync(Guid productId, int quantity, CancellationToken cancellationToken);
+}
+
+public class InventoryService : IInventoryService
+{
+    private readonly IRepository<Product> _repository;
+    
+    public InventoryService(IRepository<Product> repository)
+    {
+        _repository = repository;
+    }
+    
+    public async Task<bool> CheckStockAsync(
+        Guid productId,
+        int quantity,
+        CancellationToken cancellationToken)
+    {
+        var product = await _repository.GetByIdAsync(productId, cancellationToken);
+        return product is not null && product.StockQuantity >= quantity;
+    }
+    
+    // Implement other methods...
+}
+```
+
+Register in `ConfigureServices`:
+
+```csharp
+builder.Services.AddScoped<IInventoryService, InventoryService>();
+```
+
+## Integration Events
+
+Publish events for cross-module communication:
+
+```csharp
+using FSH.Framework.Eventing;
+
+namespace FSH.Modules.Catalog.IntegrationEvents;
+
+public sealed record ProductCreatedEvent(
+    Guid ProductId,
+    string Name,
+    decimal Price) : IIntegrationEvent;
+```
+
+Publish from handler:
+
+```csharp
+public sealed class CreateProductCommandHandler : ICommandHandler<CreateProductCommand, Guid>
+{
+    private readonly IRepository<Product> _repository;
+    private readonly IEventPublisher _eventPublisher;
+    
+    public CreateProductCommandHandler(
+        IRepository<Product> repository,
+        IEventPublisher eventPublisher)
+    {
+        _repository = repository;
+        _eventPublisher = eventPublisher;
+    }
+    
+    public async ValueTask<Guid> Handle(
+        CreateProductCommand command,
+        CancellationToken cancellationToken)
+    {
+        var product = Product.Create(...);
+        await _repository.AddAsync(product, cancellationToken);
+        
+        // Publish integration event
+        await _eventPublisher.PublishAsync(
+            new ProductCreatedEvent(product.Id, product.Name, product.Price),
+            cancellationToken);
+        
+        return product.Id;
+    }
+}
+```
+
+Handle in another module:
+
+```csharp
+public sealed class ProductCreatedEventHandler : IIntegrationEventHandler<ProductCreatedEvent>
+{
+    private readonly ILogger<ProductCreatedEventHandler> _logger;
+    
+    public ProductCreatedEventHandler(ILogger<ProductCreatedEventHandler> logger)
+    {
+        _logger = logger;
+    }
+    
+    public async ValueTask Handle(
+        ProductCreatedEvent @event,
+        CancellationToken cancellationToken)
+    {
+        _logger.LogInformation(
+            "Product created: {ProductId} - {Name}",
+            @event.ProductId,
+            @event.Name);
+        
+        // Handle the event...
+        await Task.CompletedTask;
+    }
+}
+```
+
+## Permissions
+
+Define module permissions in the Contracts project:
+
+```csharp
+namespace FSH.Modules.Catalog.Contracts;
+
+public static class CatalogPermissionConstants
+{
+    public static class Products
+    {
+        public const string View = "Permissions.Catalog.Products.View";
+        public const string Create = "Permissions.Catalog.Products.Create";
+        public const string Update = "Permissions.Catalog.Products.Update";
+        public const string Delete = "Permissions.Catalog.Products.Delete";
+    }
+}
+```
+
+Seed permissions during database initialization:
+
+```csharp
+public class CatalogDbInitializer : IDbInitializer
+{
+    public async Task InitializeAsync(CancellationToken cancellationToken)
+    {
+        // Seed permissions...
+    }
+}
+```
+
+Register initializer:
+
+```csharp
+builder.Services.AddScoped<IDbInitializer, CatalogDbInitializer>();
+```
+
+## Testing
+
+Create unit tests for your module:
+
+```csharp
+using FSH.Modules.Catalog.Domain;
+using FSH.Modules.Catalog.Features.v1.CreateProduct;
+using Xunit;
+
+namespace FSH.Modules.Catalog.Tests.Features;
+
+public class CreateProductCommandHandlerTests
+{
+    [Fact]
+    public async Task Handle_ValidCommand_CreatesProduct()
+    {
+        // Arrange
+        var repository = new MockRepository<Product>();
+        var handler = new CreateProductCommandHandler(repository);
+        var command = new CreateProductCommand(
+            Name: "Test Product",
+            Description: "Test Description",
+            Price: 99.99m,
+            StockQuantity: 10);
+        
+        // Act
+        var productId = await handler.Handle(command, CancellationToken.None);
+        
+        // Assert
+        Assert.NotEqual(Guid.Empty, productId);
+        Assert.Single(repository.Entities);
+        var product = repository.Entities.First();
+        Assert.Equal("Test Product", product.Name);
+    }
+}
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Single Responsibility" icon="bullseye">
+    Each feature handles one specific operation
+  </Card>
+  
+  <Card title="Always Validate" icon="check-double">
+    Every command must have a FluentValidation validator
+  </Card>
+  
+  <Card title="Use Specifications" icon="filter">
+    Encapsulate query logic in reusable specifications
+  </Card>
+  
+  <Card title="Domain Events" icon="bell">
+    Use integration events for cross-module communication
+  </Card>
+</CardGroup>
+
+<Warning>
+  Modules should NOT directly reference other modules. Use Contracts projects and integration events instead.
+</Warning>
+
+## Common Patterns
+
+### Soft Delete
+
+```csharp
+public class Product : AuditableEntity, ISoftDelete
+{
+    public DateTime? DeletedOn { get; set; }
+    public Guid? DeletedBy { get; set; }
+}
+```
+
+### Multi-Tenancy Support
+
+```csharp
+public class Product : AuditableEntity, IMustHaveTenant
+{
+    public string TenantId { get; set; } = default!;
+}
+```
+
+### Optimistic Concurrency
+
+```csharp
+public class Product : AuditableEntity
+{
+    [Timestamp]
+    public byte[] RowVersion { get; set; } = default!;
+}
+```
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="Identity Module" icon="user-shield" href="/modules/identity">
+    Study the Identity module implementation
+  </Card>
+  
+  <Card title="API Documentation" icon="book" href="/api/identity/authentication">
+    Document your endpoints with OpenAPI
+  </Card>
+  
+  <Card title="Testing Guide" icon="vial" href="/development/testing">
+    Write comprehensive tests for your module
+  </Card>
+</CardGroup>

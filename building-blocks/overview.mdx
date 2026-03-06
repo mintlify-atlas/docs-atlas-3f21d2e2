@@ -1,0 +1,222 @@
+---
+title: Building Blocks Overview
+description: Reusable infrastructure packages for building modular .NET applications
+icon: cube
+---
+
+## What are Building Blocks?
+
+Building Blocks are the foundational infrastructure packages of the FullStackHero .NET Starter Kit. They provide reusable, production-ready implementations of common enterprise patterns and cross-cutting concerns.
+
+<Note>
+  Building Blocks are **protected** — modify with caution. They are designed to be stable, reusable, and shared across all modules.
+</Note>
+
+## Architecture
+
+Building Blocks follow a layered architecture:
+
+```
+Modules (Business Logic)
+    ↓ depends on
+Building Blocks (Infrastructure)
+    ↓ depends on
+.NET BCL + Third-party libraries
+```
+
+## Available Building Blocks
+
+<CardGroup cols={3}>
+  <Card title="Core" icon="gem" href="/building-blocks/core">
+    DDD primitives, entities, domain events, exceptions
+  </Card>
+  <Card title="Persistence" icon="database" href="/building-blocks/persistence">
+    Repository pattern, specifications, EF Core extensions
+  </Card>
+  <Card title="Caching" icon="bolt" href="/building-blocks/caching">
+    Hybrid L1/L2 cache with Redis support
+  </Card>
+  <Card title="Mailing" icon="envelope" href="/building-blocks/mailing">
+    SMTP and SendGrid email providers
+  </Card>
+  <Card title="Jobs" icon="clock" href="/building-blocks/jobs">
+    Background job processing with Hangfire
+  </Card>
+  <Card title="Storage" icon="folder" href="/building-blocks/storage">
+    Local and S3 file storage abstractions
+  </Card>
+  <Card title="Eventing" icon="signal" href="/building-blocks/eventing">
+    Domain events, integration events, outbox pattern
+  </Card>
+  <Card title="Web" icon="globe" href="/building-blocks/web">
+    ASP.NET Core extensions, OpenAPI, CORS, auth
+  </Card>
+</CardGroup>
+
+## Design Principles
+
+### 1. Abstraction over Implementation
+
+Building Blocks expose clean interfaces and hide implementation details:
+
+```csharp
+public interface IStorageService
+{
+    Task<string> UploadAsync<T>(FileUploadRequest request, 
+        FileType fileType, CancellationToken ct);
+}
+
+// Swap implementations without changing consumers
+services.AddHeroLocalFileStorage(); // or
+services.AddHeroStorage(configuration); // S3
+```
+
+### 2. Convention over Configuration
+
+Sensible defaults with opt-in customization:
+
+```csharp
+builder.AddHeroPlatform(options =>
+{
+    options.EnableCaching = true;    // Opt-in
+    options.EnableJobs = true;       // Opt-in
+    options.EnableMailing = false;   // Default off
+});
+```
+
+### 3. Multi-Tenancy First
+
+All Building Blocks respect tenant isolation:
+
+```csharp
+public interface IDomainEvent
+{
+    string? TenantId { get; }
+}
+
+public interface IIntegrationEvent
+{
+    string? TenantId { get; }
+}
+```
+
+### 4. Testability
+
+All abstractions are mockable and testable:
+
+```csharp
+public class MyServiceTests
+{
+    [Fact]
+    public async Task Should_Cache_Result()
+    {
+        var mockCache = Substitute.For<ICacheService>();
+        var service = new MyService(mockCache);
+        // Test without real Redis
+    }
+}
+```
+
+## Package Structure
+
+```
+src/BuildingBlocks/
+├── Core/                    # Domain primitives
+├── Persistence/             # Data access patterns
+├── Caching/                 # Distributed caching
+├── Mailing/                 # Email services
+├── Jobs/                    # Background processing
+├── Storage/                 # File management
+├── Eventing/                # Event-driven messaging
+├── Eventing.Abstractions/   # Event contracts
+├── Web/                     # ASP.NET Core extensions
+├── Shared/                  # Cross-cutting DTOs
+└── Blazor.UI/              # Blazor components
+```
+
+## Adding to Your Module
+
+Reference Building Blocks in your module's `.csproj`:
+
+```xml
+<ItemGroup>
+  <ProjectReference Include="..\..\BuildingBlocks\Core\FSH.Framework.Core.csproj" />
+  <ProjectReference Include="..\..\BuildingBlocks\Persistence\FSH.Framework.Persistence.csproj" />
+</ItemGroup>
+```
+
+## Extension Methods Pattern
+
+All Building Blocks follow a consistent registration pattern:
+
+<CodeGroup>
+```csharp Services Registration
+builder.Services.AddHeroCaching(configuration);
+builder.Services.AddHeroJobs();
+builder.Services.AddHeroMailing();
+builder.Services.AddHeroStorage(configuration);
+```
+
+```csharp Middleware Registration
+app.UseHeroSecurityHeaders();
+app.UseHeroCors();
+app.UseHeroRateLimiting();
+app.UseHeroJobDashboard(configuration);
+```
+</CodeGroup>
+
+## Best Practices
+
+<Steps>
+  <Step title="Use Interfaces">
+    Always depend on abstractions (`ICacheService`, `IJobService`) not concrete types.
+  </Step>
+  <Step title="Leverage DI">
+    All Building Block services are registered in the DI container. Inject them via constructors.
+  </Step>
+  <Step title="Follow Naming Conventions">
+    Extension methods use `AddHero*` and `UseHero*` prefixes for consistency.
+  </Step>
+  <Step title="Configure via appsettings.json">
+    Building Blocks bind configuration from `appsettings.json` using `IOptions<T>` pattern.
+  </Step>
+</Steps>
+
+## Configuration Example
+
+```json appsettings.json
+{
+  "CachingOptions": {
+    "Redis": "localhost:6379",
+    "EnableSsl": false,
+    "DefaultSlidingExpiration": "00:05:00"
+  },
+  "HangfireOptions": {
+    "Route": "/jobs",
+    "UserName": "admin",
+    "Password": "admin"
+  },
+  "MailOptions": {
+    "UseSendGrid": false,
+    "From": "noreply@example.com",
+    "DisplayName": "FSH Application"
+  }
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Core Primitives" icon="gem" href="/building-blocks/core">
+    Learn about DDD entities, value objects, and domain events
+  </Card>
+  <Card title="Persistence Layer" icon="database" href="/building-blocks/persistence">
+    Master repository patterns and specifications
+  </Card>
+  <Card title="Web Extensions" icon="globe" href="/building-blocks/web">
+    Configure OpenAPI, CORS, rate limiting, and more
+  </Card>
+  <Card title="Event-Driven Design" icon="signal" href="/building-blocks/eventing">
+    Implement outbox pattern and integration events
+  </Card>
+</CardGroup>

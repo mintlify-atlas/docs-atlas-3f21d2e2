@@ -1,0 +1,331 @@
+---
+title: Activity Audit Logs
+description: Query general activity audit events including HTTP requests, commands, and queries
+---
+
+## Get Activity Audits
+
+Retrieve all audit events with comprehensive filtering and pagination.
+
+<CodeGroup>
+```http GET /api/v1/audits
+GET /api/v1/audits?pageNumber=1&pageSize=20&eventType=Activity&fromUtc=2026-03-01T00:00:00Z
+```
+
+```bash cURL
+curl -X GET 'https://api.example.com/api/v1/audits?pageNumber=1&pageSize=20&eventType=Activity' \
+  -H 'Authorization: Bearer {token}'
+```
+
+```csharp C#
+var query = new GetAuditsQuery
+{
+    PageNumber = 1,
+    PageSize = 20,
+    EventType = AuditEventType.Activity,
+    FromUtc = new DateTime(2026, 3, 1, 0, 0, 0, DateTimeKind.Utc),
+    ToUtc = DateTime.UtcNow
+};
+var response = await mediator.Send(query, cancellationToken);
+```
+</CodeGroup>
+
+### Query Parameters
+
+<ParamField query="pageNumber" type="integer" default="1">
+  Page number for pagination
+</ParamField>
+
+<ParamField query="pageSize" type="integer" default="10">
+  Number of items per page (max 100)
+</ParamField>
+
+<ParamField query="sort" type="string" default="occurredAtUtc desc">
+  Sort field and direction (e.g., "occurredAtUtc", "severity desc")
+</ParamField>
+
+<ParamField query="eventType" type="enum">
+  Filter by event type:
+  - `EntityChange` - Database entity changes
+  - `Security` - Authentication/authorization events
+  - `Activity` - General activity events
+  - `Exception` - Exception and error events
+</ParamField>
+
+<ParamField query="severity" type="enum">
+  Filter by severity level:
+  - `Trace`
+  - `Debug`
+  - `Information`
+  - `Warning`
+  - `Error`
+  - `Critical`
+</ParamField>
+
+<ParamField query="fromUtc" type="datetime">
+  Start date/time for audit events (UTC)
+</ParamField>
+
+<ParamField query="toUtc" type="datetime">
+  End date/time for audit events (UTC)
+</ParamField>
+
+<ParamField query="tenantId" type="string">
+  Filter by tenant identifier
+</ParamField>
+
+<ParamField query="userId" type="string">
+  Filter by user identifier
+</ParamField>
+
+<ParamField query="source" type="string">
+  Filter by source system/module (e.g., "FSH.Modules.Identity")
+</ParamField>
+
+<ParamField query="correlationId" type="string">
+  Filter by correlation identifier to find related events
+</ParamField>
+
+<ParamField query="traceId" type="string">
+  Filter by distributed tracing identifier
+</ParamField>
+
+<ParamField query="tags" type="flags">
+  Filter by audit tags (bitwise flags):
+  - `1` - PiiMasked
+  - `2` - OutOfQuota
+  - `4` - Sampled
+  - `8` - RetainedLong
+  - `16` - HealthCheck
+  - `32` - Authentication
+  - `64` - Authorization
+</ParamField>
+
+<ParamField query="search" type="string">
+  Full-text search across audit event payloads
+</ParamField>
+
+### Authorization
+
+Requires `Permissions.Auditing.View` permission.
+
+### Response
+
+Returns a paginated list of audit events.
+
+<ResponseField name="data" type="array">
+  Array of audit summary objects
+  
+  <ResponseField name="id" type="uuid">
+    Unique audit event identifier
+  </ResponseField>
+  
+  <ResponseField name="occurredAtUtc" type="datetime">
+    When the event occurred
+  </ResponseField>
+  
+  <ResponseField name="eventType" type="enum">
+    Type of audit event (EntityChange, Security, Activity, Exception)
+  </ResponseField>
+  
+  <ResponseField name="severity" type="enum">
+    Event severity level
+  </ResponseField>
+  
+  <ResponseField name="tenantId" type="string" nullable>
+    Associated tenant identifier
+  </ResponseField>
+  
+  <ResponseField name="userId" type="string" nullable>
+    User who triggered the event
+  </ResponseField>
+  
+  <ResponseField name="userName" type="string" nullable>
+    Display name of the user
+  </ResponseField>
+  
+  <ResponseField name="traceId" type="string" nullable>
+    Distributed tracing identifier
+  </ResponseField>
+  
+  <ResponseField name="correlationId" type="string" nullable>
+    Correlation identifier for related events
+  </ResponseField>
+  
+  <ResponseField name="requestId" type="string" nullable>
+    HTTP request identifier
+  </ResponseField>
+  
+  <ResponseField name="source" type="string" nullable>
+    Source system or module
+  </ResponseField>
+  
+  <ResponseField name="tags" type="flags">
+    Bitwise flags for metadata
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="pageNumber" type="integer">
+  Current page number
+</ResponseField>
+
+<ResponseField name="pageSize" type="integer">
+  Items per page
+</ResponseField>
+
+<ResponseField name="totalCount" type="integer">
+  Total number of matching audit events
+</ResponseField>
+
+<ResponseField name="totalPages" type="integer">
+  Total number of pages
+</ResponseField>
+
+<ResponseExample>
+```json 200 Success
+{
+  "data": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "occurredAtUtc": "2026-03-06T14:23:15.123Z",
+      "eventType": "Activity",
+      "severity": "Information",
+      "tenantId": "acme-corp",
+      "userId": "user-123",
+      "userName": "john.doe@acme.com",
+      "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "correlationId": "abc123",
+      "requestId": "0HN1234567890",
+      "source": "FSH.Modules.Identity",
+      "tags": 0
+    },
+    {
+      "id": "660e9511-f3ac-52e5-b827-557766551111",
+      "occurredAtUtc": "2026-03-06T14:22:08.456Z",
+      "eventType": "EntityChange",
+      "severity": "Information",
+      "tenantId": "acme-corp",
+      "userId": "user-456",
+      "userName": "jane.smith@acme.com",
+      "traceId": "5cg03g4688c45db7b4df030e1f1f5847",
+      "correlationId": "def456",
+      "requestId": "0HN1234567891",
+      "source": "FSH.Modules.Catalog",
+      "tags": 1
+    }
+  ],
+  "pageNumber": 1,
+  "pageSize": 20,
+  "totalCount": 2,
+  "totalPages": 1
+}
+```
+</ResponseExample>
+
+## Event Types
+
+### Activity Events
+
+Track general application activity:
+
+- **HTTP Requests** - API endpoint calls
+- **Commands** - CQRS command executions
+- **Queries** - CQRS query executions
+- **Background Jobs** - Scheduled task executions
+- **Integrations** - External system interactions
+
+```http
+GET /api/v1/audits?eventType=Activity&userId=user-123
+```
+
+### Entity Change Events
+
+Track database modifications:
+
+- Insert, Update, Delete operations
+- Before/after values for changed fields
+- Entity type and identifiers
+
+```http
+GET /api/v1/audits?eventType=EntityChange&fromUtc=2026-03-06T00:00:00Z
+```
+
+## Common Use Cases
+
+### Track User Activity
+
+Get all actions performed by a specific user:
+
+```http
+GET /api/v1/audits?userId=user-123&fromUtc=2026-03-01T00:00:00Z&pageSize=50
+```
+
+### Monitor Tenant Activity
+
+View all activity for a specific tenant:
+
+```http
+GET /api/v1/audits?tenantId=acme-corp&eventType=Activity
+```
+
+### Investigate Errors
+
+Find all error-level events:
+
+```http
+GET /api/v1/audits?severity=Error&fromUtc=2026-03-06T00:00:00Z
+```
+
+### Debug Distributed Transactions
+
+Trace related events using correlation ID:
+
+```http
+GET /api/v1/audits?correlationId=abc123
+```
+
+### Search Audit Logs
+
+Perform full-text search across audit payloads:
+
+```http
+GET /api/v1/audits?search=product%20deleted
+```
+
+## Filtering by Tags
+
+Use bitwise flags to filter by multiple tags:
+
+```http
+# Find events with PII that was masked (flag = 1)
+GET /api/v1/audits?tags=1
+
+# Find authentication events (flag = 32)
+GET /api/v1/audits?tags=32
+
+# Exclude health checks (use search parameter to filter out)
+GET /api/v1/audits?search=-healthcheck
+```
+
+## Sorting
+
+Sort results by any field:
+
+```http
+# Most recent first (default)
+GET /api/v1/audits?sort=occurredAtUtc desc
+
+# Highest severity first
+GET /api/v1/audits?sort=severity desc
+
+# By user name
+GET /api/v1/audits?sort=userName
+```
+
+<Info>
+  Activity audits are retained according to your configured retention policy. High-severity events and those tagged with `RetainedLong` are kept longer.
+</Info>
+
+<Warning>
+  Large date ranges and full-text searches may impact performance. Use specific filters when possible.
+</Warning>

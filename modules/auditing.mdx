@@ -1,0 +1,690 @@
+---
+title: 'Auditing Module'
+description: 'Comprehensive audit logging for security, activity, and exceptions'
+icon: 'clipboard-list'
+---
+
+## Overview
+
+The Auditing module provides a flexible, high-performance audit logging system that captures security events, HTTP activity, entity changes, and exceptions. It uses a channel-based publisher for non-blocking writes and supports extensible enrichment.
+
+**Module Order:** `300` (loads after Identity and Multitenancy)
+
+**API Base Path:** `/api/v1/audits`
+
+## Features
+
+<CardGroup cols={2}>
+  <Card title="Security Audits" icon="shield">
+    Login attempts, token operations, and authorization failures
+  </Card>
+  
+  <Card title="Activity Logging" icon="clock">
+    HTTP requests with timing, status codes, and payload capture
+  </Card>
+  
+  <Card title="Entity Changes" icon="database">
+    Track all database modifications with before/after snapshots
+  </Card>
+  
+  <Card title="Exception Tracking" icon="triangle-exclamation">
+    Automatic exception capture with stack traces and context
+  </Card>
+</CardGroup>
+
+## Implementation
+
+The module is defined in `AuditingModule.cs` (auditing/Modules.Auditing):
+
+```csharp
+namespace FSH.Modules.Auditing;
+
+public class AuditingModule : IModule
+{
+    public void ConfigureServices(IHostApplicationBuilder builder)
+    {
+        // Configuration
+        var httpOpts = builder.Configuration.GetSection("Auditing").Get<AuditHttpOptions>() ?? new AuditHttpOptions();
+        builder.Services.AddSingleton(httpOpts);
+        
+        // Core services
+        builder.Services.AddHttpContextAccessor();
+        builder.Services.AddScoped<IAuditClient, DefaultAuditClient>();
+        builder.Services.AddScoped<ISecurityAudit, SecurityAudit>();
+        builder.Services.AddSingleton<IAuditSerializer, SystemTextJsonAuditSerializer>();
+        
+        // Scope and enrichers
+        builder.Services.AddScoped<IAuditScope, HttpAuditScope>();
+        builder.Services.AddScoped<IAuditMaskingService, JsonMaskingService>();
+        
+        // Background processing
+        builder.Services.AddSingleton<ChannelAuditPublisher>();
+        builder.Services.AddSingleton<IAuditPublisher>(sp => sp.GetRequiredService<ChannelAuditPublisher>());
+        builder.Services.AddSingleton<IAuditSink, SqlAuditSink>();
+        builder.Services.AddHostedService<AuditBackgroundWorker>();
+        
+        // Audit configuration
+        builder.Services.AddHostedService<AuditingConfigurator>();
+        
+        // Database
+        builder.Services.AddHeroDbContext<AuditDbContext>();
+        builder.Services.AddScoped<IDbInitializer, AuditDbInitializer>();
+        
+        // Health checks
+        builder.Services.AddHealthChecks()
+            .AddDbContextCheck<AuditDbContext>(
+                name: "db:auditing",
+                failureStatus: HealthStatus.Unhealthy);
+    }
+    
+    public void MapEndpoints(IEndpointRouteBuilder endpoints)
+    {
+        var apiVersionSet = endpoints.NewApiVersionSet()
+            .HasApiVersion(new ApiVersion(1))
+            .ReportApiVersions()
+            .Build();
+        
+        var group = endpoints
+            .MapGroup("api/v{version:apiVersion}/audits")
+            .WithTags("Audits")
+            .WithApiVersionSet(apiVersionSet);
+        
+        // Query endpoints
+        group.MapGetAuditsEndpoint();
+        group.MapGetAuditByIdEndpoint();
+        group.MapGetAuditsByCorrelationEndpoint();
+        group.MapGetAuditsByTraceEndpoint();
+        group.MapGetSecurityAuditsEndpoint();
+        group.MapGetExceptionAuditsEndpoint();
+        group.MapGetAuditSummaryEndpoint();
+    }
+}
+```
+
+## Audit Architecture
+
+The auditing system uses a fluent, channel-based architecture:
+
+<Steps>
+  <Step title="Create Audit Event">
+    Use the fluent `Audit` API to create typed audit events
+  </Step>
+  
+  <Step title="Enrich Context">
+    Enrichers automatically add user, tenant, trace, and correlation IDs
+  </Step>
+  
+  <Step title="Channel Publishing">
+    Events are published to an unbounded channel (non-blocking)
+  </Step>
+  
+  <Step title="Background Processing">
+    `AuditBackgroundWorker` consumes events and writes to database
+  </Step>
+  
+  <Step title="Query API">
+    Query endpoints provide filtering, search, and correlation
+  </Step>
+</Steps>
+
+## Audit API
+
+The `Audit` static class provides a fluent interface for creating audit events (auditing/Core/Audit.cs):
+
+### Security Audit
+
+```csharp
+using FSH.Modules.Auditing;
+using FSH.Modules.Auditing.Contracts;
+
+// Login succeeded
+await Audit.ForSecurity(SecurityAction.LoginSucceeded)
+    .WithUser(userId: user.Id, userName: user.Email)
+    .WithSecurityContext(
+        subjectId: user.Id,
+        clientId: "web-app",
+        authMethod: "Password",
+        claims: new Dictionary<string, object?> 
+        { 
+            ["ip"] = httpContext.Connection.RemoteIpAddress?.ToString(),
+            ["userAgent"] = httpContext.Request.Headers.UserAgent.ToString()
+        })
+    .WriteAsync();
+
+// Login failed
+await Audit.ForSecurity(SecurityAction.LoginFailed)
+    .WithSecurityContext(
+        subjectId: loginRequest.Email,
+        clientId: "web-app",
+        authMethod: "Password",
+        reasonCode: "InvalidCredentials")
+    .WithSeverity(AuditSeverity.Warning)
+    .WriteAsync();
+```
+
+### Activity Audit
+
+```csharp
+// HTTP activity
+await Audit.ForActivity(ActivityKind.HttpRequest, "GET /api/products")
+    .WithActivityResult(
+        statusCode: 200,
+        durationMs: 145,
+        captured: BodyCapture.Both,
+        requestSize: 0,
+        responseSize: 4096)
+    .WriteAsync();
+```
+
+### Entity Change Audit
+
+```csharp
+// Entity modification
+var changes = new[]
+{
+    new PropertyChange("Name", "Old Name", "New Name"),
+    new PropertyChange("Price", "99.99", "129.99")
+};
+
+await Audit.ForEntityChange(
+    dbContext: "CatalogDbContext",
+    schema: "catalog",
+    table: "Products",
+    entityName: "Product",
+    key: product.Id.ToString(),
+    operation: EntityOperation.Update,
+    changes: changes)
+    .WithEntityTransactionId(transaction.TransactionId.ToString())
+    .WriteAsync();
+```
+
+### Exception Audit
+
+```csharp
+try
+{
+    // Some operation
+}
+catch (Exception ex)
+{
+    await Audit.ForException(ex, ExceptionArea.Api, routeOrLocation: "/api/products")
+        .WithSeverity(AuditSeverity.Error)
+        .WriteAsync();
+    
+    throw;
+}
+```
+
+## Security Audit Service
+
+The `ISecurityAudit` service provides convenience methods for common security events (auditing/Core/SecurityAudit.cs):
+
+```csharp
+public interface ISecurityAudit
+{
+    ValueTask LoginSucceededAsync(string userId, string userName, string clientId, string ip, string userAgent, CancellationToken ct = default);
+    
+    ValueTask LoginFailedAsync(string subjectIdOrName, string clientId, string reason, string ip, CancellationToken ct = default);
+    
+    ValueTask TokenIssuedAsync(string userId, string userName, string clientId, string tokenFingerprint, DateTime expiresUtc, CancellationToken ct = default);
+    
+    ValueTask TokenRevokedAsync(string userId, string clientId, string reason, CancellationToken ct = default);
+}
+```
+
+### Usage Example
+
+```csharp
+public class TokenService
+{
+    private readonly ISecurityAudit _securityAudit;
+    
+    public TokenService(ISecurityAudit securityAudit)
+    {
+        _securityAudit = securityAudit;
+    }
+    
+    public async Task<TokenResponse> GenerateAsync(LoginRequest request)
+    {
+        // Validate credentials...
+        
+        if (!isValid)
+        {
+            await _securityAudit.LoginFailedAsync(
+                subjectIdOrName: request.Email,
+                clientId: "web-app",
+                reason: "InvalidCredentials",
+                ip: GetClientIp());
+            
+            throw new UnauthorizedException("Invalid credentials");
+        }
+        
+        // Generate token...
+        
+        await _securityAudit.LoginSucceededAsync(
+            userId: user.Id,
+            userName: user.Email,
+            clientId: "web-app",
+            ip: GetClientIp(),
+            userAgent: GetUserAgent());
+        
+        return token;
+    }
+}
+```
+
+## Audit Client
+
+The `IAuditClient` provides a scoped API for writing audits (auditing/Core/DefaultAuditClient.cs):
+
+```csharp
+public interface IAuditClient
+{
+    ValueTask WriteSecurityAsync(
+        SecurityAction action,
+        string? subjectId = null,
+        string? clientId = null,
+        string? authMethod = null,
+        string? reasonCode = null,
+        IReadOnlyDictionary<string, object?>? claims = null,
+        AuditSeverity severity = AuditSeverity.Information,
+        string? source = null,
+        CancellationToken ct = default);
+    
+    ValueTask WriteActivityAsync(
+        ActivityKind kind,
+        string name,
+        int? statusCode = null,
+        int durationMs = 0,
+        CancellationToken ct = default);
+    
+    ValueTask WriteExceptionAsync(
+        Exception exception,
+        ExceptionArea area = ExceptionArea.None,
+        string? routeOrLocation = null,
+        CancellationToken ct = default);
+}
+```
+
+## Audit Endpoints
+
+### Query Endpoints
+
+| Method | Endpoint | Description | Permission |
+|--------|----------|-------------|------------|
+| `GET` | `/audits` | List all audits with pagination | `Auditing.View` |
+| `GET` | `/audits/{id}` | Get audit by ID | `Auditing.View` |
+| `GET` | `/audits/correlation/{id}` | Get audits by correlation ID | `Auditing.View` |
+| `GET` | `/audits/trace/{id}` | Get audits by trace ID | `Auditing.View` |
+| `GET` | `/audits/security` | Get security audits only | `Auditing.View` |
+| `GET` | `/audits/exceptions` | Get exception audits only | `Auditing.View` |
+| `GET` | `/audits/summary` | Get audit summary statistics | `Auditing.View` |
+
+### Example: List Audits
+
+Endpoint implementation (auditing/Features/v1/GetAudits):
+
+```csharp
+public static class GetAuditsEndpoint
+{
+    public static RouteHandlerBuilder MapGetAuditsEndpoint(this IEndpointRouteBuilder group)
+    {
+        return group.MapGet(
+                "/",
+                async ([AsParameters] GetAuditsQuery query, IMediator mediator, CancellationToken cancellationToken) =>
+                    await mediator.Send(query, cancellationToken))
+            .WithName("GetAudits")
+            .WithSummary("List and search audit events")
+            .WithDescription("Retrieve audit events with pagination and filters.")
+            .RequirePermission(AuditingPermissionConstants.View);
+    }
+}
+```
+
+### Query Parameters
+
+The `GetAuditsQuery` supports:
+
+```csharp
+public record GetAuditsQuery : IQuery<PagedList<AuditDto>>
+{
+    public int PageNumber { get; init; } = 1;
+    public int PageSize { get; init; } = 10;
+    public AuditEventType? EventType { get; init; }
+    public AuditSeverity? Severity { get; init; }
+    public string? UserId { get; init; }
+    public string? TenantId { get; init; }
+    public DateTime? FromDate { get; init; }
+    public DateTime? ToDate { get; init; }
+    public string? SearchTerm { get; init; }
+}
+```
+
+Example request:
+
+```bash
+GET /api/v1/audits?
+  eventType=Security&
+  severity=Warning&
+  userId=123&
+  fromDate=2024-01-01&
+  toDate=2024-01-31&
+  pageNumber=1&
+  pageSize=50
+```
+
+## Audit Event Types
+
+```csharp
+public enum AuditEventType
+{
+    EntityChange,
+    Security,
+    Activity,
+    Exception
+}
+```
+
+### Security Actions
+
+```csharp
+public enum SecurityAction
+{
+    LoginSucceeded,
+    LoginFailed,
+    TokenIssued,
+    TokenRevoked,
+    PermissionDenied,
+    PolicyFailed
+}
+```
+
+### Activity Kinds
+
+```csharp
+public enum ActivityKind
+{
+    HttpRequest,
+    BackgroundJob,
+    Integration,
+    Command,
+    Query
+}
+```
+
+### Exception Areas
+
+```csharp
+public enum ExceptionArea
+{
+    None,
+    Api,
+    Database,
+    Integration,
+    BackgroundJob
+}
+```
+
+### Severity Levels
+
+```csharp
+public enum AuditSeverity
+{
+    Information,
+    Warning,
+    Error,
+    Critical
+}
+```
+
+## Audit Scope
+
+The `IAuditScope` provides ambient context for the current request:
+
+```csharp
+public interface IAuditScope
+{
+    string? TenantId { get; }
+    string? UserId { get; }
+    string? UserName { get; }
+    string? TraceId { get; }
+    string? SpanId { get; }
+    string? CorrelationId { get; }
+    string? RequestId { get; }
+    string? Source { get; }
+    AuditTag Tags { get; }
+}
+```
+
+The `HttpAuditScope` implementation automatically populates from `HttpContext`.
+
+## Enrichers
+
+Enrichers add contextual information to audit events:
+
+```csharp
+public interface IAuditEnricher
+{
+    void Enrich(AuditEnvelope envelope);
+}
+```
+
+Common enrichments:
+- Tenant ID from multitenancy context
+- User ID and name from claims
+- Trace and span IDs from distributed tracing
+- Correlation ID for request grouping
+
+## Masking Sensitive Data
+
+The `IAuditMaskingService` redacts sensitive fields:
+
+```csharp
+public interface IAuditMaskingService
+{
+    string Mask(string json, IEnumerable<string> fieldsToMask);
+}
+```
+
+Example:
+
+```csharp
+var masked = maskingService.Mask(
+    json: requestBody,
+    fieldsToMask: new[] { "password", "ssn", "creditCard" });
+```
+
+## Background Processing
+
+Audits are processed asynchronously via `AuditBackgroundWorker`:
+
+```csharp
+public class AuditBackgroundWorker : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        await foreach (var envelope in _channel.Reader.ReadAllAsync(stoppingToken))
+        {
+            await _sink.WriteAsync(envelope, stoppingToken);
+        }
+    }
+}
+```
+
+### Channel Publisher
+
+The `ChannelAuditPublisher` uses `System.Threading.Channels` for high-throughput:
+
+```csharp
+public class ChannelAuditPublisher : IAuditPublisher
+{
+    private readonly Channel<IAuditEvent> _channel = Channel.CreateUnbounded<IAuditEvent>();
+    
+    public async ValueTask PublishAsync(IAuditEvent auditEvent, CancellationToken ct = default)
+    {
+        await _channel.Writer.WriteAsync(auditEvent, ct);
+    }
+}
+```
+
+### Audit Sink
+
+The `SqlAuditSink` writes to the database:
+
+```csharp
+public interface IAuditSink
+{
+    ValueTask WriteAsync(IAuditEvent auditEvent, CancellationToken ct = default);
+}
+```
+
+## Configuration
+
+Configure auditing options in `appsettings.json`:
+
+```json
+{
+  "Auditing": {
+    "CaptureRequestBody": true,
+    "CaptureResponseBody": false,
+    "MaxBodySize": 4096,
+    "ExcludedPaths": [
+      "/health",
+      "/metrics",
+      "/swagger"
+    ],
+    "SensitiveFields": [
+      "password",
+      "token",
+      "secret",
+      "apiKey"
+    ]
+  }
+}
+```
+
+### Options Model
+
+```csharp
+public class AuditHttpOptions
+{
+    public bool CaptureRequestBody { get; set; } = true;
+    public bool CaptureResponseBody { get; set; } = false;
+    public int MaxBodySize { get; set; } = 4096;
+    public List<string> ExcludedPaths { get; set; } = new();
+    public List<string> SensitiveFields { get; set; } = new();
+}
+```
+
+<Warning>
+  Capturing response bodies can significantly increase storage requirements. Only enable for debugging.
+</Warning>
+
+## Database Context
+
+```csharp
+public class AuditDbContext : DbContext
+{
+    public DbSet<AuditLog> AuditLogs { get; set; }
+}
+
+public class AuditLog
+{
+    public Guid Id { get; set; }
+    public DateTime OccurredAtUtc { get; set; }
+    public DateTime ReceivedAtUtc { get; set; }
+    public AuditEventType EventType { get; set; }
+    public AuditSeverity Severity { get; set; }
+    public string? TenantId { get; set; }
+    public string? UserId { get; set; }
+    public string? UserName { get; set; }
+    public string? TraceId { get; set; }
+    public string? SpanId { get; set; }
+    public string? CorrelationId { get; set; }
+    public string? RequestId { get; set; }
+    public string? Source { get; set; }
+    public AuditTag Tags { get; set; }
+    public string PayloadJson { get; set; } = default!;
+}
+```
+
+## Correlation and Tracing
+
+Audits support distributed tracing and correlation:
+
+### By Trace ID
+
+Get all audits for a distributed trace:
+
+```bash
+GET /api/v1/audits/trace/00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+```
+
+### By Correlation ID
+
+Get all audits for a logical operation:
+
+```bash
+GET /api/v1/audits/correlation/order-12345
+```
+
+## Audit Tags
+
+Tags provide additional categorization:
+
+```csharp
+[Flags]
+public enum AuditTag
+{
+    None = 0,
+    Critical = 1,
+    Compliance = 2,
+    Security = 4,
+    Performance = 8,
+    Debug = 16
+}
+```
+
+Usage:
+
+```csharp
+await Audit.ForSecurity(SecurityAction.LoginFailed)
+    .WithTags(AuditTag.Critical | AuditTag.Security)
+    .WriteAsync();
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Sensitive Data" icon="eye-slash">
+    Always mask passwords, tokens, and PII in audit logs
+  </Card>
+  
+  <Card title="Retention Policy" icon="calendar">
+    Implement automatic cleanup of old audit records
+  </Card>
+  
+  <Card title="Performance" icon="gauge">
+    Channel-based publishing ensures auditing doesn't block requests
+  </Card>
+  
+  <Card title="Compliance" icon="scale-balanced">
+    Use audit logs for GDPR, SOC2, and regulatory compliance
+  </Card>
+</CardGroup>
+
+<Note>
+  Audit logs are immutable. Never allow deletion or modification except via automated retention policies.
+</Note>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Creating Modules" icon="plus" href="/modules/creating-modules">
+    Learn how to build your own custom modules
+  </Card>
+  
+  <Card title="Identity Module" icon="user-shield" href="/modules/identity">
+    Explore authentication and security features
+  </Card>
+</CardGroup>

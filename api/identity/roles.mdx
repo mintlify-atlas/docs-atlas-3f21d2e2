@@ -1,0 +1,336 @@
+---
+title: 'Roles'
+description: 'Role management endpoints for creating, updating, and managing roles'
+---
+
+## Overview
+
+The Roles API provides endpoints for managing roles within the system. Roles are used to group permissions and assign them to users.
+
+## List Roles
+
+Retrieve all roles available for the current tenant.
+
+<CodeGroup>
+```bash cURL
+curl -X GET https://api.example.com/api/v1/identity/roles \
+  -H "Authorization: Bearer {access_token}"
+```
+
+```csharp C#
+var query = new GetRolesQuery();
+var roles = await mediator.Send(query);
+```
+</CodeGroup>
+
+### HTTP Request
+
+`GET /api/v1/identity/roles`
+
+### Authorization
+
+Requires `Permissions.Roles.View` permission.
+
+### Response
+
+Returns an array of `RoleDto` objects.
+
+<ResponseField name="id" type="string">
+  Role's unique identifier
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  Role name
+</ResponseField>
+
+<ResponseField name="description" type="string">
+  Role description (optional)
+</ResponseField>
+
+<ResponseField name="permissions" type="array<string>">
+  Array of permission strings assigned to the role (optional)
+</ResponseField>
+
+### Response Example
+
+```json
+[
+  {
+    "id": "admin-role-id",
+    "name": "Administrator",
+    "description": "Full system access",
+    "permissions": [
+      "Permissions.Users.View",
+      "Permissions.Users.Create",
+      "Permissions.Users.Update",
+      "Permissions.Users.Delete"
+    ]
+  },
+  {
+    "id": "user-role-id",
+    "name": "User",
+    "description": "Basic user access",
+    "permissions": [
+      "Permissions.Users.View"
+    ]
+  }
+]
+```
+
+---
+
+## Get Role by ID
+
+Retrieve a specific role by its unique identifier.
+
+<CodeGroup>
+```bash cURL
+curl -X GET https://api.example.com/api/v1/identity/roles/{roleId} \
+  -H "Authorization: Bearer {access_token}"
+```
+
+```csharp C#
+var query = new GetRoleQuery(roleId);
+var role = await mediator.Send(query);
+```
+</CodeGroup>
+
+### HTTP Request
+
+`GET /api/v1/identity/roles/{id}`
+
+### Authorization
+
+Requires `Permissions.Roles.View` permission.
+
+### Path Parameters
+
+<ParamField path="id" type="guid" required>
+  The unique identifier of the role
+</ParamField>
+
+### Response
+
+Returns a `RoleDto` object with role details.
+
+---
+
+## Create or Update Role
+
+Create a new role or update an existing role's name and description.
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://api.example.com/api/v1/identity/roles \
+  -H "Authorization: Bearer {access_token}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "custom-role-id",
+    "name": "Manager",
+    "description": "Department manager role"
+  }'
+```
+
+```csharp C#
+var command = new UpsertRoleCommand
+{
+    Id = "custom-role-id",
+    Name = "Manager",
+    Description = "Department manager role"
+};
+
+var role = await mediator.Send(command);
+```
+</CodeGroup>
+
+### HTTP Request
+
+`POST /api/v1/identity/roles`
+
+### Authorization
+
+Requires `Permissions.Roles.Create` permission.
+
+### Request Body
+
+<ParamField body="id" type="string" required>
+  Role ID. If the role exists, it will be updated; otherwise, a new role is created.
+</ParamField>
+
+<ParamField body="name" type="string" required>
+  Role name (must be unique within the tenant)
+</ParamField>
+
+<ParamField body="description" type="string">
+  Role description (optional)
+</ParamField>
+
+### Response
+
+Returns the created or updated `RoleDto` object.
+
+### Response Example
+
+```json
+{
+  "id": "custom-role-id",
+  "name": "Manager",
+  "description": "Department manager role",
+  "permissions": []
+}
+```
+
+---
+
+## Update Role Permissions
+
+Replace the set of permissions assigned to a role.
+
+<CodeGroup>
+```bash cURL
+curl -X PUT https://api.example.com/api/v1/identity/{roleId}/permissions \
+  -H "Authorization: Bearer {access_token}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "roleId": "custom-role-id",
+    "permissions": [
+      "Permissions.Users.View",
+      "Permissions.Users.Create",
+      "Permissions.Products.View"
+    ]
+  }'
+```
+
+```csharp C#
+var command = new UpdatePermissionsCommand
+{
+    RoleId = "custom-role-id",
+    Permissions = new List<string>
+    {
+        "Permissions.Users.View",
+        "Permissions.Users.Create",
+        "Permissions.Products.View"
+    }
+};
+
+var response = await mediator.Send(command);
+```
+</CodeGroup>
+
+### HTTP Request
+
+`PUT /api/v1/identity/{id}/permissions`
+
+### Authorization
+
+Requires `Permissions.Roles.Update` permission.
+
+### Path Parameters
+
+<ParamField path="id" type="string" required>
+  The unique identifier of the role
+</ParamField>
+
+### Request Body
+
+<ParamField body="roleId" type="string" required>
+  The ID of the role to update (must match the path parameter)
+</ParamField>
+
+<ParamField body="permissions" type="array<string>" required>
+  Array of permission strings to assign to the role. This replaces all existing permissions.
+</ParamField>
+
+### Response
+
+Returns a success message string.
+
+### Response Example
+
+```json
+"Permissions updated successfully"
+```
+
+### Error Responses
+
+<ResponseField name="400" type="error">
+  Bad Request - Role ID in path doesn't match request body
+</ResponseField>
+
+---
+
+## Get Role with Permissions
+
+Retrieve a role along with its assigned permissions.
+
+<CodeGroup>
+```bash cURL
+curl -X GET https://api.example.com/api/v1/identity/roles/{roleId}/permissions \
+  -H "Authorization: Bearer {access_token}"
+```
+
+```csharp C#
+var query = new GetRoleWithPermissionsQuery(roleId);
+var roleWithPermissions = await mediator.Send(query);
+```
+</CodeGroup>
+
+### HTTP Request
+
+`GET /api/v1/identity/roles/{id}/permissions`
+
+### Authorization
+
+Requires `Permissions.Roles.View` permission.
+
+### Path Parameters
+
+<ParamField path="id" type="string" required>
+  The unique identifier of the role
+</ParamField>
+
+### Response
+
+Returns a `RoleDto` object including the permissions array.
+
+---
+
+## Delete Role
+
+Remove an existing role by its unique identifier.
+
+<CodeGroup>
+```bash cURL
+curl -X DELETE https://api.example.com/api/v1/identity/roles/{roleId} \
+  -H "Authorization: Bearer {access_token}"
+```
+
+```csharp C#
+var command = new DeleteRoleCommand(roleId);
+await mediator.Send(command);
+```
+</CodeGroup>
+
+### HTTP Request
+
+`DELETE /api/v1/identity/roles/{id}`
+
+### Authorization
+
+Requires `Permissions.Roles.Delete` permission.
+
+### Path Parameters
+
+<ParamField path="id" type="guid" required>
+  The unique identifier of the role to delete
+</ParamField>
+
+### Response
+
+Returns `204 No Content` on successful deletion.
+
+### Notes
+
+- System roles cannot be deleted
+- Roles assigned to users may require reassignment before deletion
+- Deleting a role removes all permission assignments for that role

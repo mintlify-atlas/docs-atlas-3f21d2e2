@@ -1,0 +1,239 @@
+---
+title: Tenant Management
+description: Create, list, and manage tenants in the multi-tenant system
+---
+
+## List Tenants
+
+Retrieve all tenants with pagination and sorting support.
+
+<CodeGroup>
+```http GET /api/v1/tenants
+GET /api/v1/tenants?pageNumber=1&pageSize=10&sort=name
+```
+
+```bash cURL
+curl -X GET 'https://api.example.com/api/v1/tenants?pageNumber=1&pageSize=10' \
+  -H 'Authorization: Bearer {token}'
+```
+
+```csharp C#
+var query = new GetTenantsQuery
+{
+    PageNumber = 1,
+    PageSize = 10,
+    Sort = "name"
+};
+var response = await mediator.Send(query, cancellationToken);
+```
+</CodeGroup>
+
+### Query Parameters
+
+<ParamField query="pageNumber" type="integer" default="1">
+  Page number for pagination
+</ParamField>
+
+<ParamField query="pageSize" type="integer" default="10">
+  Number of items per page
+</ParamField>
+
+<ParamField query="sort" type="string">
+  Sort field and direction (e.g., "name", "name desc")
+</ParamField>
+
+### Authorization
+
+Requires `Permissions.Multitenancy.View` permission.
+
+### Response
+
+Returns a paginated list of tenants.
+
+<ResponseField name="data" type="array">
+  Array of tenant objects
+  
+  <ResponseField name="id" type="string">
+    Unique tenant identifier
+  </ResponseField>
+  
+  <ResponseField name="name" type="string">
+    Tenant display name
+  </ResponseField>
+  
+  <ResponseField name="adminEmail" type="string">
+    Administrator email address
+  </ResponseField>
+  
+  <ResponseField name="isActive" type="boolean">
+    Whether the tenant is currently active
+  </ResponseField>
+  
+  <ResponseField name="validUpto" type="datetime">
+    Subscription expiration date
+  </ResponseField>
+  
+  <ResponseField name="connectionString" type="string" nullable>
+    Database connection string (if using separate database)
+  </ResponseField>
+  
+  <ResponseField name="issuer" type="string" nullable>
+    JWT issuer for the tenant
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="pageNumber" type="integer">
+  Current page number
+</ResponseField>
+
+<ResponseField name="pageSize" type="integer">
+  Items per page
+</ResponseField>
+
+<ResponseField name="totalCount" type="integer">
+  Total number of tenants
+</ResponseField>
+
+<ResponseField name="totalPages" type="integer">
+  Total number of pages
+</ResponseField>
+
+<ResponseExample>
+```json Response
+{
+  "data": [
+    {
+      "id": "root",
+      "name": "Root Tenant",
+      "adminEmail": "admin@root.com",
+      "isActive": true,
+      "validUpto": "2026-12-31T23:59:59Z",
+      "connectionString": null,
+      "issuer": "https://api.example.com"
+    },
+    {
+      "id": "acme-corp",
+      "name": "Acme Corporation",
+      "adminEmail": "admin@acme.com",
+      "isActive": true,
+      "validUpto": "2026-06-30T23:59:59Z",
+      "connectionString": "Server=db.acme.com;Database=AcmeDb;",
+      "issuer": "https://acme.example.com"
+    }
+  ],
+  "pageNumber": 1,
+  "pageSize": 10,
+  "totalCount": 2,
+  "totalPages": 1
+}
+```
+</ResponseExample>
+
+---
+
+## Create Tenant
+
+Create a new tenant with provisioning workflow.
+
+<CodeGroup>
+```http POST /api/v1/tenants
+POST /api/v1/tenants
+Content-Type: application/json
+
+{
+  "id": "new-tenant",
+  "name": "New Tenant",
+  "connectionString": null,
+  "adminEmail": "admin@newtenant.com",
+  "issuer": "https://newtenant.example.com"
+}
+```
+
+```bash cURL
+curl -X POST 'https://api.example.com/api/v1/tenants' \
+  -H 'Authorization: Bearer {token}' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "id": "new-tenant",
+    "name": "New Tenant",
+    "adminEmail": "admin@newtenant.com"
+  }'
+```
+
+```csharp C#
+var command = new CreateTenantCommand(
+    Id: "new-tenant",
+    Name: "New Tenant",
+    ConnectionString: null,
+    AdminEmail: "admin@newtenant.com",
+    Issuer: "https://newtenant.example.com"
+);
+var response = await mediator.Send(command, cancellationToken);
+```
+</CodeGroup>
+
+### Request Body
+
+<ParamField body="id" type="string" required>
+  Unique tenant identifier (slug format recommended)
+</ParamField>
+
+<ParamField body="name" type="string" required>
+  Display name for the tenant
+</ParamField>
+
+<ParamField body="adminEmail" type="string" required>
+  Administrator email address for the tenant
+</ParamField>
+
+<ParamField body="connectionString" type="string">
+  Custom database connection string. Leave null to use shared database with tenant isolation.
+</ParamField>
+
+<ParamField body="issuer" type="string">
+  JWT issuer URL for the tenant's authentication
+</ParamField>
+
+### Authorization
+
+Requires `Permissions.Multitenancy.Create` permission.
+
+### Response
+
+Returns provisioning status for the new tenant.
+
+<ResponseField name="id" type="string">
+  The created tenant identifier
+</ResponseField>
+
+<ResponseField name="provisioningCorrelationId" type="string">
+  Correlation ID for tracking the provisioning workflow
+</ResponseField>
+
+<ResponseField name="status" type="string">
+  Current provisioning status (e.g., "Pending", "InProgress", "Completed")
+</ResponseField>
+
+<ResponseExample>
+```json 200 Success
+{
+  "id": "new-tenant",
+  "provisioningCorrelationId": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "InProgress"
+}
+```
+
+```json 400 Bad Request
+{
+  "title": "Validation Error",
+  "status": 400,
+  "errors": {
+    "Id": ["Tenant with this ID already exists"]
+  }
+}
+```
+</ResponseExample>
+
+<Note>
+  Tenant provisioning is an asynchronous process. Use the `provisioningCorrelationId` to check status via the provisioning status endpoint.
+</Note>

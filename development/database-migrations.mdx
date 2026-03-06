@@ -1,0 +1,533 @@
+---
+title: Database Migrations
+description: Managing EF Core migrations in a multi-tenant environment
+---
+
+## Overview
+
+FullStackHero uses **Entity Framework Core** migrations to manage database schema changes. The architecture supports **multi-tenancy** with per-tenant databases.
+
+<Note>
+  Migrations are stored in a separate project (`Migrations.PostgreSQL`) and are tenant-aware.
+</Note>
+
+## Migration Project Structure
+
+```
+src/Playground/Migrations.PostgreSQL/
+├── Migrations.PostgreSQL.csproj
+├── Identity/                    # Identity module migrations
+│   ├── 20251222232937_Initial.cs
+│   └── IdentityDbContextModelSnapshot.cs
+├── MultiTenancy/                # Multitenancy module migrations
+│   ├── 20251203033647_Initial.cs
+│   └── MultitenancyDbContextModelSnapshot.cs
+└── Audit/                       # Auditing module migrations
+    ├── 20251203033647_Add Audits.cs
+    └── AuditDbContextModelSnapshot.cs
+```
+
+Each module has its own `DbContext` and separate migration folder.
+
+## DbContext Configuration
+
+Modules define their own `DbContext` with tenant-aware configuration:
+
+```csharp title="IdentityDbContext.cs"
+using Finbuckle.MultiTenant.Abstractions;
+using Finbuckle.MultiTenant.Identity.EntityFrameworkCore;
+using FSH.Framework.Persistence;
+using FSH.Modules.Identity.Domain;
+using Microsoft.EntityFrameworkCore;
+
+namespace FSH.Modules.Identity.Data;
+
+public class IdentityDbContext : MultiTenantIdentityDbContext<FshUser, FshRole, string, ...>
+{
+    private readonly DatabaseOptions _settings;
+    private new AppTenantInfo TenantInfo { get; set; }
+    private readonly IHostEnvironment _environment;
+
+    // DbSets
+    public DbSet<Group> Groups => Set<Group>();
+    public DbSet<GroupRole> GroupRoles => Set<GroupRole>();
+    public DbSet<UserGroup> UserGroups => Set<UserGroup>();
+
+    public IdentityDbContext(
+        IMultiTenantContextAccessor<AppTenantInfo> multiTenantContextAccessor,
+        DbContextOptions<IdentityDbContext> options,
+        IOptions<DatabaseOptions> settings,
+        IHostEnvironment environment) : base(multiTenantContextAccessor, options)
+    {
+        _environment = environment;
+        _settings = settings.Value;
+        TenantInfo = multiTenantContextAccessor.MultiTenantContext.TenantInfo!;
+    }
+
+    protected override void OnModelCreating(ModelBuilder builder)
+    {
+        base.OnModelCreating(builder);
+        
+        // Apply configurations from assembly
+        builder.ApplyConfigurationsFromAssembly(typeof(IdentityDbContext).Assembly);
+    }
+
+    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+    {
+        if (!string.IsNullOrWhiteSpace(TenantInfo?.ConnectionString))
+        {
+            optionsBuilder.ConfigureHeroDatabase(
+                _settings.Provider,
+                TenantInfo.ConnectionString,
+                _settings.MigrationsAssembly,
+                _environment.IsDevelopment());
+        }
+    }
+}
+```
+
+## Common Migration Commands
+
+### Add Migration
+
+Create a new migration after changing entities:
+
+```bash
+dotnet ef migrations add {MigrationName} \
+  --project src/Playground/Migrations.PostgreSQL \
+  --startup-project src/Playground/Playground.Api \
+  --context {DbContextName}
+```
+
+**Examples:**
+
+<CodeGroup>
+
+```bash Identity Module
+dotnet ef migrations add AddUserGroups \
+  --project src/Playground/Migrations.PostgreSQL \
+  --startup-project src/Playground/Playground.Api \
+  --context IdentityDbContext
+```
+
+```bash Multitenancy Module
+dotnet ef migrations add AddTenantSettings \
+  --project src/Playground/Migrations.PostgreSQL \
+  --startup-project src/Playground/Playground.Api \
+  --context MultitenancyDbContext
+```
+
+```bash Auditing Module
+dotnet ef migrations add AddAuditMetadata \
+  --project src/Playground/Migrations.PostgreSQL \
+  --startup-project src/Playground/Playground.Api \
+  --context AuditingDbContext
+```
+
+</CodeGroup>
+
+### Apply Migrations
+
+Apply pending migrations to the database:
+
+```bash
+dotnet ef database update \
+  --project src/Playground/Migrations.PostgreSQL \
+  --startup-project src/Playground/Playground.Api \
+  --context IdentityDbContext
+```
+
+<Note>
+  In production, migrations are applied automatically on startup via `UseHeroMultiTenantDatabases()`.
+</Note>
+
+### List Migrations
+
+View all migrations and their status:
+
+```bash
+dotnet ef migrations list \
+  --project src/Playground/Migrations.PostgreSQL \
+  --startup-project src/Playground/Playground.Api \
+  --context IdentityDbContext
+```
+
+### Remove Last Migration
+
+Remove the most recent migration (before applying):
+
+```bash
+dotnet ef migrations remove \
+  --project src/Playground/Migrations.PostgreSQL \
+  --startup-project src/Playground/Playground.Api \
+  --context IdentityDbContext
+```
+
+### Generate SQL Script
+
+Generate SQL for production deployment:
+
+```bash
+dotnet ef migrations script \
+  --project src/Playground/Migrations.PostgreSQL \
+  --startup-project src/Playground/Playground.Api \
+  --context IdentityDbContext \
+  --output migrations.sql
+```
+
+## Multi-Tenant Database Management
+
+### UseHeroMultiTenantDatabases
+
+The application automatically applies migrations to all tenant databases on startup:
+
+```csharp title="Program.cs"
+var app = builder.Build();
+
+// Apply migrations to host and all tenant databases
+app.UseHeroMultiTenantDatabases();
+
+app.Run();
+```
+
+This extension is defined in the Multitenancy module:
+
+```csharp title="Extensions.cs"
+using Finbuckle.MultiTenant;
+using Microsoft.AspNetCore.Builder;
+
+namespace FSH.Modules.Multitenancy;
+
+public static class Extensions
+{
+    public static WebApplication UseHeroMultiTenantDatabases(this WebApplication app)
+    {
+        ArgumentNullException.ThrowIfNull(app);
+        app.UseMultiTenant();
+
+        return app;
+    }
+}
+```
+
+### Database Per Tenant
+
+FSH supports two multi-tenancy strategies:
+
+<CardGroup cols={2}>
+  <Card title="Shared Database" icon="database">
+    **Single database with tenant isolation**
+    - Tenant ID column on all tables
+    - Automatic query filters
+    - Lower infrastructure cost
+  </Card>
+  <Card title="Database Per Tenant" icon="layer-group">
+    **Separate database for each tenant**
+    - Complete data isolation
+    - Independent scaling
+    - Easier compliance (GDPR, etc.)
+  </Card>
+</CardGroup>
+
+The default configuration uses **database per tenant**.
+
+## Entity Configuration
+
+Use `IEntityTypeConfiguration<T>` to configure entities:
+
+```csharp title="GroupConfiguration.cs"
+using FSH.Modules.Identity.Domain;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
+
+namespace FSH.Modules.Identity.Data.Configurations;
+
+public class GroupConfiguration : IEntityTypeConfiguration<Group>
+{
+    public void Configure(EntityTypeBuilder<Group> builder)
+    {
+        builder.ToTable("Groups", "identity");
+
+        builder.HasKey(g => g.Id);
+
+        builder.Property(g => g.Name)
+            .IsRequired()
+            .HasMaxLength(256);
+
+        builder.Property(g => g.Description)
+            .HasMaxLength(1024);
+
+        builder.HasIndex(g => g.Name)
+            .IsUnique();
+
+        // Relationships
+        builder.HasMany(g => g.GroupRoles)
+            .WithOne()
+            .HasForeignKey(gr => gr.GroupId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        builder.HasMany(g => g.UserGroups)
+            .WithOne()
+            .HasForeignKey(ug => ug.GroupId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // Soft delete query filter
+        builder.HasQueryFilter(g => !g.IsDeleted);
+    }
+}
+```
+
+## Migration Workflow
+
+<Steps>
+
+### Step 1: Add Entity or Modify Schema
+
+Create or modify domain entities in the module:
+
+```csharp title="Group.cs"
+public class Group : ISoftDeletable
+{
+    public Guid Id { get; private set; }
+    public string Name { get; private set; } = default!;
+    public string? Description { get; private set; }
+    // ... other properties
+}
+```
+
+### Step 2: Create Entity Configuration
+
+Define the database mapping:
+
+```csharp title="GroupConfiguration.cs"
+public class GroupConfiguration : IEntityTypeConfiguration<Group>
+{
+    public void Configure(EntityTypeBuilder<Group> builder)
+    {
+        builder.ToTable("Groups", "identity");
+        builder.HasKey(g => g.Id);
+        builder.Property(g => g.Name).IsRequired().HasMaxLength(256);
+        // ... other configurations
+    }
+}
+```
+
+### Step 3: Add DbSet to DbContext
+
+```csharp title="IdentityDbContext.cs"
+public DbSet<Group> Groups => Set<Group>();
+```
+
+### Step 4: Build the Solution
+
+```bash
+dotnet build src/FSH.Framework.slnx
+```
+
+<Note>
+  The build must succeed with **0 warnings** before creating migrations.
+</Note>
+
+### Step 5: Create Migration
+
+```bash
+dotnet ef migrations add AddGroups \
+  --project src/Playground/Migrations.PostgreSQL \
+  --startup-project src/Playground/Playground.Api \
+  --context IdentityDbContext
+```
+
+### Step 6: Review Generated Migration
+
+Check the generated migration file:
+
+```csharp title="20251222232937_AddGroups.cs"
+using Microsoft.EntityFrameworkCore.Migrations;
+
+public partial class AddGroups : Migration
+{
+    protected override void Up(MigrationBuilder migrationBuilder)
+    {
+        migrationBuilder.CreateTable(
+            name: "Groups",
+            schema: "identity",
+            columns: table => new
+            {
+                Id = table.Column<Guid>(type: "uuid", nullable: false),
+                Name = table.Column<string>(type: "character varying(256)", maxLength: 256, nullable: false),
+                Description = table.Column<string>(type: "character varying(1024)", maxLength: 1024, nullable: true),
+                IsDefault = table.Column<bool>(type: "boolean", nullable: false),
+                // ... other columns
+            },
+            constraints: table =>
+            {
+                table.PrimaryKey("PK_Groups", x => x.Id);
+            });
+
+        migrationBuilder.CreateIndex(
+            name: "IX_Groups_Name",
+            schema: "identity",
+            table: "Groups",
+            column: "Name",
+            unique: true);
+    }
+
+    protected override void Down(MigrationBuilder migrationBuilder)
+    {
+        migrationBuilder.DropTable(
+            name: "Groups",
+            schema: "identity");
+    }
+}
+```
+
+### Step 7: Apply Migration
+
+Apply to development database:
+
+```bash
+dotnet ef database update \
+  --project src/Playground/Migrations.PostgreSQL \
+  --startup-project src/Playground/Playground.Api \
+  --context IdentityDbContext
+```
+
+Or run the application (migrations apply automatically):
+
+```bash
+dotnet run --project src/Playground/Playground.Api
+```
+
+</Steps>
+
+## Migration Naming Conventions
+
+Use descriptive names that explain the change:
+
+<CodeGroup>
+
+```txt Adding Entity
+AddGroups
+AddUserGroups
+AddGroupRoles
+```
+
+```txt Adding Column
+AddDescriptionToGroups
+AddIsDefaultToGroups
+```
+
+```txt Removing Column
+RemoveOldFieldFromGroups
+```
+
+```txt Adding Index
+CreateGroupNameIndex
+AddUserEmailIndex
+```
+
+```txt Renaming
+RenameGroupNameToDisplayName
+```
+
+</CodeGroup>
+
+## Troubleshooting
+
+### No DbContext was found
+
+**Error:** `No DbContext named 'IdentityDbContext' was found.`
+
+**Solution:** Always specify the context explicitly:
+
+```bash
+--context IdentityDbContext
+```
+
+### Build failed
+
+**Error:** Migration creation fails due to build errors.
+
+**Solution:** Build the solution first:
+
+```bash
+dotnet build src/FSH.Framework.slnx
+```
+
+### Pending migrations
+
+**Error:** Database is out of sync with migrations.
+
+**Solution:** Apply pending migrations:
+
+```bash
+dotnet ef database update --context IdentityDbContext
+```
+
+### Migration already applied
+
+**Error:** Cannot remove migration that's already applied.
+
+**Solution:** Check `__EFMigrationsHistory` table:
+
+```sql
+SELECT * FROM "__EFMigrationsHistory";
+```
+
+Revert using SQL or create a new migration to undo changes.
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Always Review Migrations" icon="eye">
+    Check the generated Up() and Down() methods before applying
+  </Card>
+  <Card title="Test Rollbacks" icon="arrow-rotate-left">
+    Verify the Down() method works correctly
+  </Card>
+  <Card title="Use Configurations" icon="gear">
+    Define entity mappings in `IEntityTypeConfiguration<T>` classes
+  </Card>
+  <Card title="Backup Production" icon="shield">
+    Always backup databases before applying migrations in production
+  </Card>
+</CardGroup>
+
+## Production Deployment
+
+### Option 1: Automatic Migration on Startup
+
+The default approach (used by `UseHeroMultiTenantDatabases()`):
+
+```csharp
+app.UseHeroMultiTenantDatabases(); // Applies migrations automatically
+```
+
+### Option 2: SQL Scripts
+
+Generate SQL scripts for DBA review:
+
+```bash
+dotnet ef migrations script \
+  --project src/Playground/Migrations.PostgreSQL \
+  --startup-project src/Playground/Playground.Api \
+  --context IdentityDbContext \
+  --output deploy/identity-migrations.sql \
+  --idempotent
+```
+
+The `--idempotent` flag ensures scripts can be run multiple times safely.
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="Creating Features" href="/development/creating-features" icon="code">
+    Build features that use your entities
+  </Card>
+  <Card title="Testing" href="/development/testing" icon="flask">
+    Test database operations
+  </Card>
+  <Card title="Domain Entities" href="/architecture/domain-driven-design" icon="cube">
+    Design rich domain models
+  </Card>
+</CardGroup>

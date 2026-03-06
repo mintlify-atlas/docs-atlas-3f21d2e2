@@ -1,0 +1,399 @@
+---
+title: Rate Limiting
+description: Protect your API with configurable rate limiting policies
+icon: gauge
+---
+
+FullStackHero includes built-in rate limiting using ASP.NET Core's rate limiting middleware. Rate limiting protects your API from abuse, ensures fair resource usage, and improves overall system stability.
+
+## Overview
+
+The rate limiting system provides:
+
+- **Global Rate Limiting**: Apply limits to all endpoints
+- **Per-Endpoint Policies**: Custom limits for specific routes
+- **Tenant-Aware Limiting**: Separate limits per tenant
+- **User-Based Limiting**: Track limits by authenticated user
+- **IP-Based Limiting**: Rate limit by client IP address
+- **Flexible Policies**: Fixed window, sliding window, token bucket, and more
+
+## Configuration
+
+Configure rate limiting in `appsettings.json`:
+
+```json appsettings.json
+{
+  "RateLimitingOptions": {
+    "Enabled": false,
+    "Global": {
+      "PermitLimit": 100,
+      "WindowSeconds": 60,
+      "QueueLimit": 0
+    },
+    "Auth": {
+      "PermitLimit": 10,
+      "WindowSeconds": 60,
+      "QueueLimit": 0
+    }
+  }
+}
+```
+
+### RateLimitingOptions
+
+<ParamField path="Enabled" type="bool" default="false">
+  Enable or disable rate limiting globally. Set to `true` in production.
+</ParamField>
+
+<ParamField path="Global" type="FixedWindowPolicyOptions">
+  Default rate limiting policy applied to all endpoints unless overridden.
+</ParamField>
+
+<ParamField path="Auth" type="FixedWindowPolicyOptions">
+  Rate limiting policy specifically for authentication endpoints (login, token refresh).
+</ParamField>
+
+### FixedWindowPolicyOptions
+
+<ParamField path="PermitLimit" type="int" default="100">
+  Maximum number of requests allowed within the time window.
+</ParamField>
+
+<ParamField path="WindowSeconds" type="int" default="60">
+  Time window duration in seconds.
+</ParamField>
+
+<ParamField path="QueueLimit" type="int" default="0">
+  Number of requests to queue when the limit is exceeded. `0` means no queuing (immediate rejection).
+</ParamField>
+
+## How It Works
+
+### Partition Key Strategy
+
+Rate limits are tracked by partition keys in this order of precedence:
+
+<Steps>
+  <Step title="Tenant">
+    If the user is authenticated and has a tenant claim, use `tenant:{tenantId}` as the partition key.
+  </Step>
+
+  <Step title="User">
+    If the user is authenticated (but no tenant), use `user:{userId}` as the partition key.
+  </Step>
+
+  <Step title="IP Address">
+    For anonymous requests, use `ip:{ipAddress}` as the partition key.
+  </Step>
+</Steps>
+
+```csharp Extensions.cs
+private static string GetPartitionKey(HttpContext context)
+{
+    var tenant = context.User?.FindFirst(ClaimConstants.Tenant)?.Value;
+    if (!string.IsNullOrWhiteSpace(tenant))
+    {
+        return $"tenant:{tenant}";
+    }
+
+    var userId = context.User?.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+    if (!string.IsNullOrWhiteSpace(userId))
+    {
+        return $"user:{userId}";
+    }
+
+    var ip = context.Connection.RemoteIpAddress?.ToString();
+    return string.IsNullOrWhiteSpace(ip) ? "ip:unknown" : $"ip:{ip}";
+}
+```
+
+### Health Check Exemption
+
+Health check endpoints are **always exempt** from rate limiting:
+
+```csharp
+private static bool IsHealthPath(PathString path) =>
+    path.StartsWithSegments("/health", StringComparison.OrdinalIgnoreCase) ||
+    path.StartsWithSegments("/healthz", StringComparison.OrdinalIgnoreCase) ||
+    path.StartsWithSegments("/ready", StringComparison.OrdinalIgnoreCase) ||
+    path.StartsWithSegments("/live", StringComparison.OrdinalIgnoreCase);
+```
+
+## Using Rate Limiting
+
+### Global Rate Limiting
+
+By default, all endpoints use the global rate limiting policy:
+
+```csharp
+services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = 429; // Too Many Requests
+    options.GlobalLimiter = CreateGlobalLimiter(settings);
+});
+```
+
+### Per-Endpoint Rate Limiting
+
+Apply specific rate limiting policies to individual endpoints:
+
+```csharp
+endpoints.MapPost("/auth/login", HandleLogin)
+    .RequireRateLimiting("auth"); // Use "auth" policy
+```
+
+### Disable Rate Limiting for Specific Endpoints
+
+Exempt certain endpoints from rate limiting:
+
+```csharp
+endpoints.MapGet("/health/ready", HandleHealthCheck)
+    .DisableRateLimiting();
+```
+
+## Policy Types
+
+### Fixed Window
+
+The default policy. Allows `PermitLimit` requests per `WindowSeconds`:
+
+```csharp
+return RateLimitPartition.GetFixedWindowLimiter(
+    partitionKey: partitionKey,
+    factory: _ => new FixedWindowRateLimiterOptions
+    {
+        PermitLimit = policy.PermitLimit,
+        Window = TimeSpan.FromSeconds(policy.WindowSeconds),
+        QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+        QueueLimit = policy.QueueLimit
+    });
+```
+
+**Example**: 100 requests per 60 seconds
+
+- User makes 100 requests at 0:00:00
+- All subsequent requests are rejected until 0:01:00
+- At 0:01:00, the window resets and 100 new requests are allowed
+
+<Note>
+  Fixed window rate limiting can allow bursts at window boundaries. For smoother rate limiting, consider implementing sliding window or token bucket policies.
+</Note>
+
+## Rate Limiting Policies
+
+### Global Policy
+
+Applied to all endpoints by default:
+
+```json
+"Global": {
+  "PermitLimit": 100,
+  "WindowSeconds": 60,
+  "QueueLimit": 0
+}
+```
+
+**Use Case**: General API protection
+
+### Authentication Policy
+
+Protects login and token refresh endpoints from brute-force attacks:
+
+```json
+"Auth": {
+  "PermitLimit": 10,
+  "WindowSeconds": 60,
+  "QueueLimit": 0
+}
+```
+
+**Use Case**: Prevent credential stuffing and brute-force attacks
+
+## Response Headers
+
+When rate limiting is enabled, responses include standard rate limit headers:
+
+```http
+HTTP/1.1 200 OK
+X-RateLimit-Limit: 100
+X-RateLimit-Remaining: 95
+X-RateLimit-Reset: 1678886400
+```
+
+<ParamField path="X-RateLimit-Limit" type="int">
+  Maximum number of requests allowed in the current window
+</ParamField>
+
+<ParamField path="X-RateLimit-Remaining" type="int">
+  Number of requests remaining in the current window
+</ParamField>
+
+<ParamField path="X-RateLimit-Reset" type="int">
+  Unix timestamp when the rate limit window resets
+</ParamField>
+
+## Rate Limit Exceeded Response
+
+When the rate limit is exceeded, the API returns `429 Too Many Requests`:
+
+```json
+HTTP/1.1 429 Too Many Requests
+Retry-After: 30
+
+{
+  "type": "https://tools.ietf.org/html/rfc6585#section-4",
+  "title": "Too Many Requests",
+  "status": 429,
+  "detail": "Rate limit exceeded. Try again in 30 seconds."
+}
+```
+
+<ParamField path="Retry-After" type="int">
+  Seconds to wait before retrying the request
+</ParamField>
+
+## Multi-Tenant Rate Limiting
+
+Rate limits are enforced **per tenant**, ensuring fair resource allocation:
+
+```bash
+# Tenant A makes 100 requests
+curl -H "tenant: tenant-a" https://api.example.com/api/v1/users
+
+# Tenant B still has 100 requests available
+curl -H "tenant: tenant-b" https://api.example.com/api/v1/users
+```
+
+Each tenant gets their own rate limit counter, preventing one tenant from exhausting the API.
+
+## Advanced Configuration
+
+### Custom Policies
+
+Define additional rate limiting policies:
+
+```csharp Extensions.cs
+options.AddPolicy<string>("strict", context =>
+    CreateFixedWindowPartition(
+        GetPartitionKey(context), 
+        new FixedWindowPolicyOptions 
+        { 
+            PermitLimit = 10, 
+            WindowSeconds = 60 
+        }));
+```
+
+Apply the custom policy:
+
+```csharp
+endpoints.MapPost("/api/v1/export", HandleExport)
+    .RequireRateLimiting("strict");
+```
+
+### Dynamic Rate Limits
+
+Implement dynamic rate limits based on user roles or subscription tiers:
+
+```csharp
+private static RateLimitPartition<string> CreateDynamicPartition(
+    HttpContext context)
+{
+    var isPremium = context.User?.HasClaim("subscription", "premium") ?? false;
+    
+    var limit = isPremium ? 1000 : 100;
+    
+    return RateLimitPartition.GetFixedWindowLimiter(
+        GetPartitionKey(context),
+        _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = limit,
+            Window = TimeSpan.FromMinutes(1)
+        });
+}
+```
+
+## Monitoring Rate Limits
+
+Monitor rate limit metrics using observability tools:
+
+- **Rate limit hits**: Number of requests that hit the limit
+- **Rate limit rejections**: Number of requests rejected (429 responses)
+- **Rate limit reset frequency**: How often limits are reached
+- **Top rate-limited users/tenants**: Identify abusive clients
+
+<Card title="Observability" icon="chart-line" href="/features/observability">
+  Learn how to monitor rate limiting with OpenTelemetry
+</Card>
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Enable Rate Limiting in Production">
+    Always enable rate limiting in production to protect against abuse and DDoS attacks.
+  </Accordion>
+
+  <Accordion title="Set Conservative Limits Initially">
+    Start with stricter limits and relax them based on usage patterns. It's easier to increase limits than deal with an overloaded system.
+  </Accordion>
+
+  <Accordion title="Use Different Policies for Different Endpoints">
+    Authentication endpoints should have stricter limits than read-only endpoints.
+  </Accordion>
+
+  <Accordion title="Monitor Rate Limit Rejections">
+    Track 429 responses to identify legitimate users hitting limits and adjust policies accordingly.
+  </Accordion>
+
+  <Accordion title="Communicate Limits to API Consumers">
+    Document rate limits in your API documentation and include them in response headers.
+  </Accordion>
+</AccordionGroup>
+
+## Testing Rate Limiting
+
+Test that rate limiting works correctly:
+
+```csharp
+[Fact]
+public async Task RateLimiting_ExceedsLimit_Returns429()
+{
+    // Arrange
+    var client = _factory.CreateClient();
+    var token = await GetValidToken();
+    client.DefaultRequestHeaders.Authorization = 
+        new AuthenticationHeaderValue("Bearer", token);
+
+    // Act - Make 101 requests (limit is 100)
+    var tasks = Enumerable.Range(0, 101)
+        .Select(_ => client.GetAsync("/api/v1/users"))
+        .ToList();
+    
+    var responses = await Task.WhenAll(tasks);
+
+    // Assert - Last request should be rate limited
+    var tooManyRequests = responses
+        .Count(r => r.StatusCode == HttpStatusCode.TooManyRequests);
+    
+    Assert.True(tooManyRequests > 0);
+}
+```
+
+## Related Topics
+
+<CardGroup cols={2}>
+  <Card title="Authentication" icon="key" href="/features/authentication">
+    Protect authentication endpoints with rate limiting
+  </Card>
+
+  <Card title="Observability" icon="chart-line" href="/features/observability">
+    Monitor rate limit metrics and rejections
+  </Card>
+
+  <Card title="Multi-Tenancy" icon="building" href="/features/multi-tenancy">
+    Implement per-tenant rate limiting
+  </Card>
+
+  <Card title="Health Checks" icon="heart-pulse" href="/features/health-checks">
+    Exempt health checks from rate limiting
+  </Card>
+</CardGroup>

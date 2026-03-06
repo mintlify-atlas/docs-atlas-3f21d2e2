@@ -1,0 +1,635 @@
+---
+title: Configuration
+description: Complete guide to configuring the FullStackHero .NET Starter Kit
+icon: sliders
+---
+
+The FullStackHero starter kit uses ASP.NET Core's configuration system with strongly-typed options classes. All settings are defined in `appsettings.json` and can be overridden via environment variables.
+
+## Configuration Sources
+
+Configuration is loaded in this order (later sources override earlier ones):
+
+1. `appsettings.json` (base settings)
+2. `appsettings.{Environment}.json` (environment-specific)
+3. User secrets (Development only)
+4. Environment variables
+5. Command-line arguments
+
+<Note>
+  In production, use environment variables or Azure Key Vault for sensitive settings like `JwtOptions__SigningKey` and connection strings.
+</Note>
+
+## Required Configuration (Production)
+
+The API validates these settings on startup when `ASPNETCORE_ENVIRONMENT=Production`:
+
+```csharp src/Playground/Playground.Api/Program.cs
+if (builder.Environment.IsProduction())
+{
+    static void Require(IConfiguration config, string key)
+    {
+        if (string.IsNullOrWhiteSpace(config[key]))
+        {
+            throw new InvalidOperationException($"Missing required configuration '{key}' in Production.");
+        }
+    }
+
+    var config = builder.Configuration;
+    Require(config, "DatabaseOptions:ConnectionString");
+    Require(config, "CachingOptions:Redis");
+    Require(config, "JwtOptions:SigningKey");
+}
+```
+
+## Database Options
+
+Configures Entity Framework Core and database provider.
+
+```json appsettings.json
+{
+  "DatabaseOptions": {
+    "Provider": "POSTGRESQL",
+    "ConnectionString": "Server=localhost;Database=fsh;User Id=postgres;Password=password",
+    "MigrationsAssembly": "FSH.Playground.Migrations.PostgreSQL"
+  }
+}
+```
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `Provider` | string | `POSTGRESQL` | Database provider: `POSTGRESQL` or `SQLSERVER` |
+| `ConnectionString` | string | *required* | Full database connection string |
+| `MigrationsAssembly` | string | *required* | Assembly containing EF Core migrations |
+
+### Environment Variable Override
+
+```bash
+export DatabaseOptions__Provider=POSTGRESQL
+export DatabaseOptions__ConnectionString="Server=prod-db;Database=fsh;User Id=app;Password=secret"
+export DatabaseOptions__MigrationsAssembly="FSH.Playground.Migrations.PostgreSQL"
+```
+
+<Warning>
+  The `MigrationsAssembly` must match your database provider:
+  - PostgreSQL: `FSH.Playground.Migrations.PostgreSQL`
+  - SQL Server: `FSH.Playground.Migrations.SqlServer`
+</Warning>
+
+## JWT Options
+
+Configures JSON Web Token authentication for API access.
+
+```json appsettings.json
+{
+  "JwtOptions": {
+    "Issuer": "fsh.local",
+    "Audience": "fsh.clients",
+    "SigningKey": "replace-with-256-bit-secret-min-32-chars",
+    "AccessTokenMinutes": 2,
+    "RefreshTokenDays": 7
+  }
+}
+```
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `Issuer` | string | `fsh.local` | Token issuer claim (`iss`) |
+| `Audience` | string | `fsh.clients` | Token audience claim (`aud`) |
+| `SigningKey` | string | *required* | Symmetric signing key (min 32 characters, 256 bits) |
+| `AccessTokenMinutes` | int | `2` | Access token lifetime in minutes |
+| `RefreshTokenDays` | int | `7` | Refresh token lifetime in days |
+
+<Warning>
+  **Security critical:**
+  - Generate a strong random key: `openssl rand -base64 32`
+  - Never commit the signing key to version control
+  - Use different keys per environment
+  - In production, access tokens default to 2 minutes for security; increase to 15-60 minutes based on requirements
+</Warning>
+
+### Environment Variable Override
+
+```bash
+export JwtOptions__SigningKey="$(openssl rand -base64 32)"
+export JwtOptions__AccessTokenMinutes=15
+export JwtOptions__RefreshTokenDays=30
+```
+
+## Caching Options
+
+Configures distributed caching with Redis.
+
+```json appsettings.json
+{
+  "CachingOptions": {
+    "Redis": ""
+  }
+}
+```
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `Redis` | string | `""` (empty) | Redis connection string. If empty, uses in-memory cache |
+
+### Behavior
+
+- **Empty string**: Uses `IMemoryCache` (in-process caching)
+- **Connection string**: Uses `IDistributedCache` with StackExchange.Redis
+
+### Environment Variable Override
+
+```bash
+# Local Redis
+export CachingOptions__Redis="localhost:6379"
+
+# Azure Cache for Redis
+export CachingOptions__Redis="mycache.redis.cache.windows.net:6380,password=key,ssl=True,abortConnect=False"
+
+# AWS ElastiCache
+export CachingOptions__Redis="master.my-cluster.abcdef.use1.cache.amazonaws.com:6379"
+```
+
+<Note>
+  Distributed caching is required for:
+  - Multi-instance deployments (horizontal scaling)
+  - Shared session state
+  - Rate limiting across instances
+</Note>
+
+## OpenTelemetry Options
+
+Configures observability with OpenTelemetry (traces, metrics, logs).
+
+```json appsettings.json
+{
+  "OpenTelemetryOptions": {
+    "Enabled": true,
+    "Tracing": {
+      "Enabled": true
+    },
+    "Metrics": {
+      "Enabled": true,
+      "MeterNames": [
+        "FSH.Modules.Identity",
+        "FSH.Modules.Multitenancy",
+        "FSH.Modules.Auditing"
+      ]
+    },
+    "Exporter": {
+      "Otlp": {
+        "Enabled": true,
+        "Endpoint": "http://localhost:4317",
+        "Protocol": "grpc"
+      }
+    },
+    "Jobs": { "Enabled": true },
+    "Mediator": { "Enabled": true },
+    "Http": {
+      "Histograms": { "Enabled": true }
+    },
+    "Data": {
+      "FilterEfStatements": true,
+      "FilterRedisCommands": true
+    }
+  }
+}
+```
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `Enabled` | bool | `true` | Master switch for OpenTelemetry |
+| `Tracing.Enabled` | bool | `true` | Enable distributed tracing |
+| `Metrics.Enabled` | bool | `true` | Enable metrics collection |
+| `Metrics.MeterNames` | string[] | `[...]` | Module-specific meters to collect |
+| `Exporter.Otlp.Enabled` | bool | `true` | Enable OTLP export |
+| `Exporter.Otlp.Endpoint` | string | `http://localhost:4317` | OTLP gRPC endpoint |
+| `Exporter.Otlp.Protocol` | string | `grpc` | Protocol: `grpc` or `http/protobuf` |
+| `Jobs.Enabled` | bool | `true` | Trace Hangfire jobs |
+| `Mediator.Enabled` | bool | `true` | Trace Mediator commands/queries |
+| `Http.Histograms.Enabled` | bool | `true` | Collect request duration histograms |
+| `Data.FilterEfStatements` | bool | `true` | Filter verbose EF Core SQL logs |
+| `Data.FilterRedisCommands` | bool | `true` | Filter verbose Redis command logs |
+
+### Supported OTLP Endpoints
+
+<CodeGroup>
+  ```bash Jaeger
+  export OpenTelemetryOptions__Exporter__Otlp__Endpoint="http://jaeger:4317"
+  ```
+
+  ```bash Azure Monitor
+  export OpenTelemetryOptions__Exporter__Otlp__Endpoint="https://dc.applicationinsights.azure.com/v2/track"
+  ```
+
+  ```bash Datadog
+  export OpenTelemetryOptions__Exporter__Otlp__Endpoint="https://api.datadoghq.com:4317"
+  ```
+
+  ```bash New Relic
+  export OpenTelemetryOptions__Exporter__Otlp__Endpoint="https://otlp.nr-data.net:4317"
+  ```
+</CodeGroup>
+
+## CORS Options
+
+Configures Cross-Origin Resource Sharing for API access.
+
+```json appsettings.json
+{
+  "CorsOptions": {
+    "AllowAll": false,
+    "AllowedOrigins": [
+      "https://localhost:4200",
+      "https://localhost:7140"
+    ],
+    "AllowedHeaders": ["content-type", "authorization"],
+    "AllowedMethods": ["GET", "POST", "PUT", "DELETE"]
+  }
+}
+```
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `AllowAll` | bool | `false` | Allow all origins (dangerous, dev only) |
+| `AllowedOrigins` | string[] | `[...]` | Whitelist of allowed origins |
+| `AllowedHeaders` | string[] | `[...]` | Allowed request headers |
+| `AllowedMethods` | string[] | `[...]` | Allowed HTTP methods |
+
+<Warning>
+  **Never** set `AllowAll: true` in production. It disables CORS protection and allows any origin to access your API.
+</Warning>
+
+### Environment Variable Override
+
+```bash
+export CorsOptions__AllowedOrigins__0="https://app.example.com"
+export CorsOptions__AllowedOrigins__1="https://admin.example.com"
+```
+
+## OpenAPI Options
+
+Configures Swagger/OpenAPI documentation.
+
+```json appsettings.json
+{
+  "OpenApiOptions": {
+    "Enabled": true,
+    "Title": "FSH PlayGround API",
+    "Version": "v1",
+    "Description": "The FSH Starter Kit API for Modular/Multitenant Architecture.",
+    "Contact": {
+      "Name": "Mukesh Murugan",
+      "Url": "https://codewithmukesh.com",
+      "Email": "mukesh@codewithmukesh.com"
+    },
+    "License": {
+      "Name": "MIT License",
+      "Url": "https://opensource.org/licenses/MIT"
+    }
+  }
+}
+```
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `Enabled` | bool | `true` | Enable OpenAPI generation |
+| `Title` | string | `FSH PlayGround API` | API title in Swagger UI |
+| `Version` | string | `v1` | API version |
+| `Description` | string | `...` | API description |
+| `Contact.*` | object | `{...}` | Contact information |
+| `License.*` | object | `{...}` | License information |
+
+Access Swagger UI at: `https://localhost:5285/scalar`
+
+## Hangfire Options
+
+Configures the Hangfire dashboard for background jobs.
+
+```json appsettings.json
+{
+  "HangfireOptions": {
+    "Username": "admin",
+    "Password": "Secure1234!Me",
+    "Route": "/jobs"
+  }
+}
+```
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `Username` | string | `admin` | Dashboard login username |
+| `Password` | string | `Secure1234!Me` | Dashboard login password |
+| `Route` | string | `/jobs` | Dashboard URL path |
+
+<Warning>
+  Change the default password before deploying to production!
+</Warning>
+
+Access dashboard at: `https://localhost:5285/jobs`
+
+## Rate Limiting Options
+
+Configures rate limiting for API endpoints.
+
+```json appsettings.json
+{
+  "RateLimitingOptions": {
+    "Enabled": false,
+    "Global": {
+      "PermitLimit": 100,
+      "WindowSeconds": 60,
+      "QueueLimit": 0
+    },
+    "Auth": {
+      "PermitLimit": 10,
+      "WindowSeconds": 60,
+      "QueueLimit": 0
+    }
+  }
+}
+```
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `Enabled` | bool | `false` | Master switch for rate limiting |
+| `Global.PermitLimit` | int | `100` | Max requests per window (global) |
+| `Global.WindowSeconds` | int | `60` | Time window in seconds |
+| `Global.QueueLimit` | int | `0` | Queue size when limit exceeded |
+| `Auth.PermitLimit` | int | `10` | Max auth requests per window |
+| `Auth.WindowSeconds` | int | `60` | Auth window in seconds |
+
+<Note>
+  The `Auth` policy applies specifically to authentication endpoints (`/api/v1/identity/tokens`) to prevent brute force attacks.
+</Note>
+
+## Mail Options
+
+Configures email sending via SMTP or SendGrid.
+
+```json appsettings.json
+{
+  "MailOptions": {
+    "UseSendGrid": false,
+    "From": "mukesh@fullstackhero.net",
+    "DisplayName": "Mukesh Murugan",
+    "SMTP": {
+      "Host": "smtp.ethereal.email",
+      "Port": 587,
+      "UserName": "anderson22@ethereal.email",
+      "Password": "rqD44sq5P6U2UDCqD1"
+    },
+    "SendGrid": {
+      "ApiKey": "your-sendgrid-api-key",
+      "From": "sendgrid@fullstackhero.net",
+      "DisplayName": "FSH SendGrid"
+    }
+  }
+}
+```
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `UseSendGrid` | bool | `false` | Use SendGrid instead of SMTP |
+| `From` | string | *required* | Sender email address |
+| `DisplayName` | string | *required* | Sender display name |
+| `SMTP.Host` | string | *required* | SMTP server hostname |
+| `SMTP.Port` | int | `587` | SMTP port (typically 587 for TLS) |
+| `SMTP.UserName` | string | *required* | SMTP username |
+| `SMTP.Password` | string | *required* | SMTP password |
+| `SendGrid.ApiKey` | string | *required* | SendGrid API key |
+
+### Test Email Setup (Ethereal)
+
+The default configuration uses [Ethereal Email](https://ethereal.email/) for testing:
+- All emails are captured (not sent to real recipients)
+- View emails at https://ethereal.email/messages
+
+## Password Policy
+
+Configures password expiration and history tracking.
+
+```json appsettings.json
+{
+  "PasswordPolicy": {
+    "PasswordHistoryCount": 5,
+    "PasswordExpiryDays": 90,
+    "PasswordExpiryWarningDays": 14,
+    "EnforcePasswordExpiry": true
+  }
+}
+```
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `PasswordHistoryCount` | int | `5` | Prevent reusing last N passwords |
+| `PasswordExpiryDays` | int | `90` | Force password change after N days |
+| `PasswordExpiryWarningDays` | int | `14` | Warn user N days before expiry |
+| `EnforcePasswordExpiry` | bool | `true` | Enable/disable password expiration |
+
+## Multitenancy Options
+
+Configures multi-tenant behavior.
+
+```json appsettings.json
+{
+  "MultitenancyOptions": {
+    "RunTenantMigrationsOnStartup": true
+  }
+}
+```
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `RunTenantMigrationsOnStartup` | bool | `true` | Auto-apply migrations to all tenant databases on startup |
+
+<Warning>
+  In production with many tenants, consider setting this to `false` and running migrations via a background job or manual process.
+</Warning>
+
+## Storage Options
+
+Configures file storage provider.
+
+```json appsettings.json
+{
+  "Storage": {
+    "Provider": "local"
+  }
+}
+```
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `Provider` | string | `local` | Storage provider: `local`, `s3`, or `azure` |
+
+### Local Storage
+
+Files stored in `wwwroot/uploads/` directory.
+
+### AWS S3
+
+```json
+{
+  "Storage": {
+    "Provider": "s3",
+    "S3": {
+      "BucketName": "fsh-storage",
+      "Region": "us-east-1",
+      "AccessKey": "your-access-key",
+      "SecretKey": "your-secret-key"
+    }
+  }
+}
+```
+
+### Azure Blob Storage
+
+```json
+{
+  "Storage": {
+    "Provider": "azure",
+    "Azure": {
+      "ConnectionString": "DefaultEndpointsProtocol=https;AccountName=...",
+      "ContainerName": "fsh-storage"
+    }
+  }
+}
+```
+
+## Security Headers Options
+
+Configures Content Security Policy (CSP) and security headers.
+
+```json appsettings.json
+{
+  "SecurityHeadersOptions": {
+    "Enabled": true,
+    "ExcludedPaths": ["/scalar", "/openapi"],
+    "AllowInlineStyles": true,
+    "ScriptSources": [],
+    "StyleSources": []
+  }
+}
+```
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `Enabled` | bool | `true` | Enable security headers |
+| `ExcludedPaths` | string[] | `["/scalar", "/openapi"]` | Paths exempt from CSP |
+| `AllowInlineStyles` | bool | `true` | Allow inline `<style>` tags |
+| `ScriptSources` | string[] | `[]` | Additional allowed script sources |
+| `StyleSources` | string[] | `[]` | Additional allowed style sources |
+
+## Serilog Configuration
+
+The starter kit uses Serilog for structured logging:
+
+```json appsettings.json
+{
+  "Serilog": {
+    "Using": ["Serilog.Sinks.Console", "Serilog.Sinks.OpenTelemetry"],
+    "Enrich": [
+      "FromLogContext",
+      "WithMachineName",
+      "WithThreadId",
+      "WithCorrelationId",
+      "WithProcessId",
+      "WithProcessName"
+    ],
+    "MinimumLevel": {
+      "Default": "Debug"
+    },
+    "WriteTo": [
+      {
+        "Name": "Console",
+        "Args": {
+          "restrictedToMinimumLevel": "Information"
+        }
+      },
+      {
+        "Name": "OpenTelemetry",
+        "Args": {
+          "endpoint": "http://localhost:4317",
+          "protocol": "grpc",
+          "resourceAttributes": {
+            "service.name": "Playground.Api"
+          }
+        }
+      }
+    ]
+  }
+}
+```
+
+Logs are:
+- Written to console with `Information` level
+- Exported to OpenTelemetry endpoint
+- Enriched with machine name, thread ID, correlation ID, process ID
+
+## Environment-Specific Configuration
+
+Override settings per environment:
+
+<CodeGroup>
+  ```json appsettings.Development.json
+  {
+    "Serilog": {
+      "MinimumLevel": {
+        "Default": "Debug"
+      }
+    },
+    "DatabaseOptions": {
+      "ConnectionString": "Server=localhost;Database=fsh_dev;..."
+    }
+  }
+  ```
+
+  ```json appsettings.Production.json
+  {
+    "Serilog": {
+      "MinimumLevel": {
+        "Default": "Warning"
+      }
+    },
+    "OpenTelemetryOptions": {
+      "Exporter": {
+        "Otlp": {
+          "Endpoint": "https://otel-collector.prod.internal:4317"
+        }
+      }
+    }
+  }
+  ```
+</CodeGroup>
+
+## Configuration Validation
+
+The API validates configuration on startup using Data Annotations:
+
+```csharp Example: JwtOptions
+[Required]
+public string SigningKey { get; set; } = string.Empty;
+
+[Range(1, 1440)]
+public int AccessTokenMinutes { get; set; } = 60;
+```
+
+Invalid configuration throws `OptionsValidationException` on startup.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Project Structure" icon="folder-tree" href="/getting-started/project-structure">
+    Understand the codebase organization
+  </Card>
+  <Card title="Database" icon="database" href="/building-blocks/persistence">
+    Learn about EF Core setup
+  </Card>
+  <Card title="Security" icon="shield" href="/features/authentication">
+    Configure JWT authentication
+  </Card>
+  <Card title="Deployment" icon="rocket" href="/deployment/overview">
+    Deploy to production
+  </Card>
+</CardGroup>

@@ -1,0 +1,315 @@
+---
+title: Authentication
+description: JWT-based authentication with token generation and refresh
+icon: key
+---
+
+FullStackHero uses JWT (JSON Web Token) authentication with support for access tokens and refresh tokens. The authentication system is built on top of the Identity module and provides secure token generation, validation, and refresh mechanisms.
+
+## Overview
+
+The authentication system provides:
+
+- **JWT Access Tokens**: Short-lived tokens for API authentication
+- **Refresh Tokens**: Long-lived tokens for obtaining new access tokens
+- **Token Rotation**: Automatic refresh token rotation on renewal
+- **Security Auditing**: Login attempts and token issuance tracking
+- **Session Management**: Track active user sessions
+
+## Configuration
+
+Configure JWT settings in `appsettings.json`:
+
+```json appsettings.json
+{
+  "JwtOptions": {
+    "Issuer": "fsh.local",
+    "Audience": "fsh.clients",
+    "SigningKey": "replace-with-256-bit-secret-min-32-chars",
+    "AccessTokenMinutes": 2,
+    "RefreshTokenDays": 7
+  }
+}
+```
+
+### JwtOptions Properties
+
+<ParamField path="Issuer" type="string" required>
+  The issuer claim identifies the principal that issued the JWT. Typically your application or domain name.
+</ParamField>
+
+<ParamField path="Audience" type="string" required>
+  The audience claim identifies the recipients that the JWT is intended for.
+</ParamField>
+
+<ParamField path="SigningKey" type="string" required>
+  The secret key used to sign JWTs. **Must be at least 32 characters long**. Keep this secure and use environment variables in production.
+</ParamField>
+
+<ParamField path="AccessTokenMinutes" type="int" default="30">
+  Access token expiration time in minutes. Shorter durations are more secure.
+</ParamField>
+
+<ParamField path="RefreshTokenDays" type="int" default="7">
+  Refresh token expiration time in days.
+</ParamField>
+
+<Note>
+  The `JwtOptions` class validates configuration on startup. The signing key must be at least 32 characters, and issuer/audience cannot be empty.
+</Note>
+
+## Token Generation
+
+### Generate Access Token
+
+The token generation endpoint authenticates users and returns JWT tokens.
+
+```csharp
+public record GenerateTokenCommand(
+    string Email,
+    string Password)
+    : ICommand<TokenResponse>;
+```
+
+**Endpoint**: `POST /api/v1/identity/token`
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://api.example.com/api/v1/identity/token \
+  -H "Content-Type: application/json" \
+  -H "tenant: root" \
+  -d '{
+    "email": "admin@root.com",
+    "password": "YourPassword123!"
+  }'
+```
+
+```json Response
+{
+  "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "refreshToken": "Zu8xNzQ2MjE0MTY5NQ==",
+  "accessTokenExpiresAt": "2026-03-06T22:30:00Z",
+  "refreshTokenExpiresAt": "2026-03-13T22:28:00Z"
+}
+```
+</CodeGroup>
+
+### Token Generation Flow
+
+The `GenerateTokenCommandHandler` performs the following steps:
+
+<Steps>
+  <Step title="Validate Credentials">
+    Validates the user's email and password using `IIdentityService.ValidateCredentialsAsync()`.
+  </Step>
+
+  <Step title="Security Audit">
+    Logs the login attempt (success or failure) using `ISecurityAudit` for compliance and monitoring.
+  </Step>
+
+  <Step title="Issue Tokens">
+    Generates JWT access token and cryptographic refresh token using `ITokenService.IssueAsync()`.
+  </Step>
+
+  <Step title="Store Refresh Token">
+    Persists the hashed refresh token in the database for validation during token refresh.
+  </Step>
+
+  <Step title="Create Session">
+    Creates a user session record for session management and tracking.
+  </Step>
+
+  <Step title="Audit Token Issuance">
+    Records token issuance with a SHA-256 fingerprint (never stores raw tokens).
+  </Step>
+
+  <Step title="Enqueue Integration Event">
+    Publishes a `TokenGeneratedIntegrationEvent` to the outbox for downstream processing.
+  </Step>
+</Steps>
+
+### Token Service Implementation
+
+The `TokenService` generates JWT tokens with user claims:
+
+```csharp TokenService.cs
+public async Task<TokenResponse> IssueAsync(
+    string subject,
+    IEnumerable<Claim> claims,
+    string? tenant = null,
+    CancellationToken ct = default)
+{
+    var signingKey = new SymmetricSecurityKey(
+        Encoding.UTF8.GetBytes(_options.SigningKey));
+    var creds = new SigningCredentials(
+        signingKey, SecurityAlgorithms.HmacSha256);
+
+    // Access token
+    var accessTokenExpiry = DateTime.UtcNow
+        .AddMinutes(_options.AccessTokenMinutes);
+    var jwtToken = new JwtSecurityToken(
+        _options.Issuer,
+        _options.Audience,
+        claims,
+        expires: accessTokenExpiry,
+        signingCredentials: creds);
+
+    var accessToken = new JwtSecurityTokenHandler().WriteToken(jwtToken);
+
+    // Refresh token
+    var refreshToken = Convert.ToBase64String(Guid.NewGuid().ToByteArray());
+    var refreshTokenExpiry = DateTime.UtcNow
+        .AddDays(_options.RefreshTokenDays);
+
+    return new TokenResponse(
+        AccessToken: accessToken,
+        RefreshToken: refreshToken,
+        RefreshTokenExpiresAt: refreshTokenExpiry,
+        AccessTokenExpiresAt: accessTokenExpiry);
+}
+```
+
+## Token Refresh
+
+Refresh tokens allow clients to obtain new access tokens without re-authenticating.
+
+**Endpoint**: `POST /api/v1/identity/token/refresh`
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://api.example.com/api/v1/identity/token/refresh \
+  -H "Content-Type: application/json" \
+  -H "tenant: root" \
+  -d '{
+    "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+    "refreshToken": "Zu8xNzQ2MjE0MTY5NQ=="
+  }'
+```
+
+```csharp Command
+public record RefreshTokenCommand(
+    string AccessToken,
+    string RefreshToken)
+    : ICommand<RefreshTokenCommandResponse>;
+```
+</CodeGroup>
+
+### Refresh Token Flow
+
+<Steps>
+  <Step title="Validate Refresh Token">
+    Checks if the refresh token exists, is not expired, and matches the stored hash.
+  </Step>
+
+  <Step title="Extract User Identity">
+    Reads user ID and claims from the (possibly expired) access token.
+  </Step>
+
+  <Step title="Issue New Tokens">
+    Generates a new access token and rotates the refresh token.
+  </Step>
+
+  <Step title="Update Session">
+    Updates the user session with the new refresh token hash.
+  </Step>
+</Steps>
+
+<Warning>
+  Refresh token rotation is enforced: each refresh token can only be used once. If a token is reused, it may indicate a security breach.
+</Warning>
+
+## Using JWT Tokens
+
+Include the access token in the `Authorization` header for authenticated requests:
+
+```bash
+curl -X GET https://api.example.com/api/v1/protected-resource \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+## Security Features
+
+<CardGroup cols={2}>
+  <Card title="Security Auditing" icon="shield-check">
+    All login attempts, token issuance, and refresh operations are audited with IP address, user agent, and timestamps.
+  </Card>
+
+  <Card title="Token Fingerprinting" icon="fingerprint">
+    Tokens are never stored in plaintext. Only SHA-256 fingerprints are persisted for audit trails.
+  </Card>
+
+  <Card title="Session Management" icon="clock">
+    Active sessions are tracked per user, allowing administrators to view and revoke sessions.
+  </Card>
+
+  <Card title="Refresh Token Rotation" icon="rotate">
+    Each refresh token can only be used once, preventing replay attacks.
+  </Card>
+</CardGroup>
+
+## Integration Events
+
+Successful token generation publishes a `TokenGeneratedIntegrationEvent` to the outbox:
+
+```csharp
+public record TokenGeneratedIntegrationEvent(
+    Guid Id,
+    DateTime OccurredOnUtc,
+    string? TenantId,
+    string? CorrelationId,
+    string Source,
+    string UserId,
+    string Email,
+    string ClientId,
+    string IpAddress,
+    string UserAgent,
+    string TokenFingerprint,
+    DateTime AccessTokenExpiresAtUtc)
+    : IntegrationEvent(Id, OccurredOnUtc, TenantId, CorrelationId, Source);
+```
+
+This event can be consumed by other modules for:
+- Analytics and monitoring
+- User activity tracking
+- Fraud detection
+- Compliance reporting
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use Short Access Token Lifetimes">
+    Keep access tokens short-lived (2-15 minutes) to minimize the impact of token theft. Use refresh tokens to obtain new access tokens.
+  </Accordion>
+
+  <Accordion title="Secure the Signing Key">
+    Store the JWT signing key in environment variables or a secure secret manager. Never commit it to source control.
+  </Accordion>
+
+  <Accordion title="Implement Token Revocation">
+    While JWTs are stateless, maintain a blacklist or use session management to revoke tokens when needed.
+  </Accordion>
+
+  <Accordion title="Use HTTPS Only">
+    Always transmit tokens over HTTPS to prevent man-in-the-middle attacks.
+  </Accordion>
+</AccordionGroup>
+
+## Related Topics
+
+<CardGroup cols={2}>
+  <Card title="Authorization" icon="lock" href="/features/authorization">
+    Learn about role-based and permission-based authorization
+  </Card>
+
+  <Card title="Multi-Tenancy" icon="building" href="/features/multi-tenancy">
+    Understand how authentication works with multi-tenant applications
+  </Card>
+
+  <Card title="Rate Limiting" icon="gauge" href="/features/rate-limiting">
+    Protect authentication endpoints with rate limiting
+  </Card>
+
+  <Card title="Observability" icon="chart-line" href="/features/observability">
+    Monitor authentication metrics and traces
+  </Card>
+</CardGroup>

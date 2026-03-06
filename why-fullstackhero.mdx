@@ -1,0 +1,428 @@
+---
+title: Why FullStackHero?
+description: Understand why teams choose FullStackHero .NET Starter Kit for building production-ready APIs
+icon: star
+---
+
+## Production-First, Not Tutorial-First
+
+Most starter kits teach patterns. **FullStackHero ships them.** This is an opinionated, battle-tested foundation for building multi-tenant SaaS and enterprise APIs on .NET 10—wired, tested, and ready for production from day one.
+
+<CardGroup cols={2}>
+  <Card title="Ship Faster" icon="rocket">
+    Get Identity, Multitenancy, Auditing, caching, mailing, jobs, storage, health checks, and OpenTelemetry out of the box
+  </Card>
+  <Card title="Modular by Design" icon="puzzle-piece">
+    Drop `Modules.Identity`, `Modules.Multitenancy`, `Modules.Auditing` into any API and let the module loader wire endpoints
+  </Card>
+  <Card title="Cloud-Ready" icon="cloud">
+    Aspire AppHost spins up Postgres + Redis + API with OTLP tracing enabled in seconds
+  </Card>
+  <Card title="Multi-Tenant from Day One" icon="users">
+    Finbuckle-powered tenancy across Identity and your module DbContexts with helpers to migrate and seed tenant databases
+  </Card>
+</CardGroup>
+
+## The FullStackHero Difference
+
+### 1. Modular Monolith Architecture
+
+<Note>
+  **Not microservices.** Not a traditional layered architecture. A modular monolith is a single deployment unit with multiple bounded contexts that communicate via contracts.
+</Note>
+
+From `src/.claude/rules/architecture.md:12-22`:
+
+```
+Single deployment unit
+    ↓
+Multiple bounded contexts (modules)
+    ↓
+Each module is self-contained
+    ↓
+Communication via Contracts (interfaces/DTOs)
+```
+
+**Why this matters:**
+
+- **Start simple, scale when needed**: Deploy as a monolith in early stages, extract to microservices only when traffic/team size demands it
+- **Shared transaction boundaries**: Multi-entity operations without distributed transactions
+- **Easier debugging**: Single process, single codebase, full stack traces
+- **Lower operational complexity**: No service mesh, no distributed tracing setup required (though OpenTelemetry is ready when you need it)
+
+### 2. Vertical Slice Architecture
+
+Every feature is a complete, self-contained slice. No more hunting through layers.
+
+From `src/Modules/Identity/Modules.Identity/Features/v1/Tokens/TokenGeneration/`:
+
+```
+Features/v1/TokenGeneration/
+├── GenerateTokenCommand.cs          # ICommand<TokenResponse>
+├── GenerateTokenCommandHandler.cs   # ICommandHandler<GenerateTokenCommand, TokenResponse>
+├── GenerateTokenCommandValidator.cs # FluentValidation rules
+└── GenerateTokenEndpoint.cs         # Minimal API endpoint mapping
+```
+
+**Benefits:**
+
+- High cohesion: All code for one feature lives together
+- Low coupling: Features don't depend on each other
+- Easy onboarding: New developers find everything in one folder
+- Refactoring confidence: Change one feature without breaking others
+
+### 3. Production-Grade Building Blocks
+
+From `src/BuildingBlocks/Web/Extensions.cs:29-87`, the platform wires:
+
+<Steps>
+  <Step title="Structured Logging">
+    Serilog with OpenTelemetry sink, correlation IDs, machine name, thread ID enrichment
+    
+    ```json
+    "Enrich": [
+      "FromLogContext",
+      "WithMachineName",
+      "WithThreadId",
+      "WithCorrelationId"
+    ]
+    ```
+    
+    From `src/Playground/Playground.Api/appsettings.json:35`
+  </Step>
+  
+  <Step title="OpenTelemetry">
+    Tracing, metrics, and logs with OTLP export to Aspire dashboard or your observability backend
+    
+    ```json
+    "OpenTelemetryOptions": {
+      "Enabled": true,
+      "Tracing": { "Enabled": true },
+      "Metrics": {
+        "Enabled": true,
+        "MeterNames": [
+          "FSH.Modules.Identity",
+          "FSH.Modules.Multitenancy",
+          "FSH.Modules.Auditing"
+        ]
+      }
+    }
+    ```
+    
+    From `src/Playground/Playground.Api/appsettings.json:2-9`
+  </Step>
+  
+  <Step title="Authentication & Authorization">
+    ASP.NET Identity with JWT issuance/refresh, roles, permissions, rate-limited auth endpoints
+    
+    From `src/Modules/Identity/Modules.Identity/Features/v1/Tokens/TokenGeneration/GenerateTokenCommandHandler.cs:60-74`:
+    
+    ```csharp
+    // Validate credentials
+    var identityResult = await _identityService
+        .ValidateCredentialsAsync(request.Email, request.Password, cancellationToken);
+
+    if (identityResult is null)
+    {
+        // Audit failed login BEFORE throwing
+        await _securityAudit.LoginFailedAsync(
+            subjectIdOrName: request.Email,
+            clientId: clientId!,
+            reason: "InvalidCredentials",
+            ip: ip,
+            ct: cancellationToken);
+
+        throw new UnauthorizedAccessException("Invalid credentials.");
+    }
+    ```
+  </Step>
+  
+  <Step title="Distributed Caching">
+    Redis-backed cache with memory fallback
+    
+    ```json
+    "CachingOptions": {
+      "Redis": "localhost:6379"
+    }
+    ```
+    
+    From `src/Playground/Playground.Api/appsettings.json:74-76`
+  </Step>
+  
+  <Step title="Background Jobs">
+    Hangfire with PostgreSQL persistence
+    
+    ```json
+    "HangfireOptions": {
+      "Username": "admin",
+      "Password": "Secure1234!Me",
+      "Route": "/jobs"
+    }
+    ```
+    
+    From `src/Playground/Playground.Api/appsettings.json:77-81`
+  </Step>
+  
+  <Step title="Health Checks">
+    Readiness and liveness probes for Kubernetes
+    
+    From `src/BuildingBlocks/Web/Extensions.cs:63`:
+    
+    ```csharp
+    builder.Services.AddHealthChecks()
+        .AddCheck("self", () => HealthCheckResult.Healthy());
+    ```
+  </Step>
+</Steps>
+
+### 4. Multi-Tenancy Out of the Box
+
+From `src/.claude/rules/architecture.md:94-113`:
+
+<CodeGroup>
+```csharp src/Modules/Identity/Features (Automatic tenant isolation)
+// Tenant-aware entity
+public class Order : BaseEntity, IMustHaveTenant
+{
+    public Guid TenantId { get; set; }  // Auto-filtered by Finbuckle
+}
+```
+
+```json src/Playground/Playground.Api/appsettings.json:156-158
+"MultitenancyOptions": {
+  "RunTenantMigrationsOnStartup": true
+}
+```
+</CodeGroup>
+
+**Tenant Resolution Order:**
+
+1. HTTP header: `tenant` (e.g., `tenant: acme-corp`)
+2. JWT claim: `tenant`
+3. Host/route strategy (optional)
+
+### 5. Real-World Patterns
+
+<Tabs>
+  <Tab title="CQRS with Mediator">
+    From `src/Modules/Identity/Modules.Identity/Features/v1/Users/SearchUsers/SearchUsersEndpoint.cs:17-18`:
+    
+    ```csharp
+    return endpoints.MapGet(
+        "/users/search",
+        async ([AsParameters] SearchUsersQuery query,
+               IMediator mediator,
+               CancellationToken cancellationToken) =>
+            await mediator.Send(query, cancellationToken))
+        .WithName("SearchUsers")
+        .WithSummary("Search users with pagination")
+        .RequirePermission(IdentityPermissionConstants.Users.View);
+    ```
+    
+    <Note>
+      Uses **Mediator** library (not MediatR). Commands/queries return `ValueTask<T>` instead of `Task<T>` for better performance.
+    </Note>
+  </Tab>
+  
+  <Tab title="FluentValidation">
+    From `src/Modules/Identity/Modules.Identity/Features/v1/Tokens/TokenGeneration/`:
+    
+    ```csharp
+    public sealed class GenerateTokenCommandValidator
+        : AbstractValidator<GenerateTokenCommand>
+    {
+        public GenerateTokenCommandValidator()
+        {
+            RuleFor(x => x.Email)
+                .NotEmpty()
+                .EmailAddress();
+            
+            RuleFor(x => x.Password)
+                .NotEmpty()
+                .MinimumLength(6);
+        }
+    }
+    ```
+    
+    Every command has a validator. No exceptions.
+  </Tab>
+  
+  <Tab title="Security Auditing">
+    From `src/Modules/Identity/Modules.Identity/Features/v1/Tokens/TokenGeneration/GenerateTokenCommandHandler.cs:79-86`:
+    
+    ```csharp
+    // Audit successful login
+    await _securityAudit.LoginSucceededAsync(
+        userId: subject,
+        userName: claims.FirstOrDefault(c => c.Type == ClaimTypes.Name)?.Value
+                 ?? request.Email,
+        clientId: clientId!,
+        ip: ip,
+        userAgent: ua,
+        ct: cancellationToken);
+    ```
+    
+    Every login, token issuance, and permission change is audited automatically.
+  </Tab>
+  
+  <Tab title="Domain Events">
+    From `src/Modules/Identity/Modules.Identity/Features/v1/Tokens/TokenGeneration/GenerateTokenCommandHandler.cs:127-141`:
+    
+    ```csharp
+    // Enqueue integration event for token generation
+    var integrationEvent = new TokenGeneratedIntegrationEvent(
+        Id: Guid.NewGuid(),
+        OccurredOnUtc: DateTime.UtcNow,
+        TenantId: tenantId,
+        CorrelationId: correlationId,
+        Source: "Identity",
+        UserId: subject,
+        Email: request.Email,
+        ClientId: clientId!,
+        IpAddress: ip,
+        UserAgent: ua,
+        TokenFingerprint: fingerprint,
+        AccessTokenExpiresAtUtc: token.AccessTokenExpiresAt);
+
+    await _outboxStore.AddAsync(integrationEvent, cancellationToken);
+    ```
+    
+    Outbox pattern for reliable event publishing.
+  </Tab>
+</Tabs>
+
+## Comparing Alternatives
+
+<AccordionGroup>
+  <Accordion title="vs. Clean Architecture / Onion Architecture">
+    **Clean Architecture:**
+    - Horizontal layers (Domain, Application, Infrastructure, Presentation)
+    - Features scattered across layers
+    - Shared "Services" folder becomes a dumping ground
+    
+    **FullStackHero:**
+    - Vertical slices (one folder per feature)
+    - Command/Query/Handler/Validator/Endpoint together
+    - No shared services layer
+    
+    **Winner:** FullStackHero for maintainability and feature isolation
+  </Accordion>
+  
+  <Accordion title="vs. Microservices">
+    **Microservices:**
+    - Multiple deployments, service mesh, distributed tracing setup
+    - Network calls between services (latency, partial failures)
+    - Complex local development (Docker Compose with 10+ containers)
+    
+    **FullStackHero:**
+    - Single deployment (start with `dotnet run`)
+    - In-process calls (fast, reliable)
+    - Simple local dev (Aspire handles Postgres + Redis)
+    
+    **Winner:** FullStackHero for early-stage products. Migrate to microservices when traffic/team size demands it.
+  </Accordion>
+  
+  <Accordion title="vs. Vertical Slice Architecture (Jimmy Bogard)">
+    **VSA (Jimmy Bogard):**
+    - Great pattern, requires manual setup
+    - No multi-tenancy story
+    - No observability, caching, or job primitives
+    
+    **FullStackHero:**
+    - VSA + production infrastructure
+    - Multi-tenancy built-in
+    - OpenTelemetry, Redis, Hangfire, mailing pre-wired
+    
+    **Winner:** FullStackHero for production readiness
+  </Accordion>
+  
+  <Accordion title="vs. ABP Framework">
+    **ABP Framework:**
+    - Heavyweight, opinionated on UI (Angular/Blazor/MVC)
+    - Module system requires ABP CLI
+    - Commercial modules behind paywall
+    
+    **FullStackHero:**
+    - Lightweight, API-first (bring your own UI)
+    - Standard .NET projects, no custom CLI
+    - All modules open source (MIT license)
+    
+    **Winner:** FullStackHero for API-first teams
+  </Accordion>
+</AccordionGroup>
+
+## Real-World Use Cases
+
+<CardGroup cols={2}>
+  <Card title="Multi-Tenant SaaS" icon="building">
+    Each customer gets isolated data via `IMustHaveTenant`. Tenant provisioning, migrations, and status management via the Multitenancy module.
+    
+    **Example:** Project management SaaS where each company is a tenant
+  </Card>
+  
+  <Card title="Enterprise APIs" icon="server">
+    Identity module provides users, roles, permissions, groups. Auditing module tracks every security event and exception.
+    
+    **Example:** Internal HR system with compliance requirements
+  </Card>
+  
+  <Card title="E-Commerce Platforms" icon="cart-shopping">
+    Add a Catalog module with vertical slices for products, categories, inventory. Use Jobs for order processing and Mailing for receipts.
+    
+    **Example:** Multi-vendor marketplace
+  </Card>
+  
+  <Card title="Workflow Automation" icon="diagram-project">
+    Leverage Hangfire for long-running workflows, domain events for inter-module communication, and auditing for compliance trails.
+    
+    **Example:** Approval workflows with email notifications
+  </Card>
+</CardGroup>
+
+## Tech Stack Highlights
+
+From `src/.claude/rules/architecture.md:217-230`:
+
+<CardGroup cols={3}>
+  <Card title=".NET 10" icon="microsoft">
+    Latest LTS with native AOT, improved performance, and C# 13
+  </Card>
+  <Card title="EF Core 10" icon="database">
+    PostgreSQL provider by default, SQL Server ready
+  </Card>
+  <Card title="Mediator" icon="share-nodes">
+    CQRS with `ICommand<T>` and `IQuery<T>` (not MediatR)
+  </Card>
+  <Card title="FluentValidation" icon="check">
+    Input validation with clean, testable rules
+  </Card>
+  <Card title="Hangfire" icon="clock">
+    Background jobs with PostgreSQL persistence
+  </Card>
+  <Card title="Finbuckle" icon="users">
+    Multi-tenancy with automatic query filtering
+  </Card>
+  <Card title="Scalar" icon="book">
+    Beautiful OpenAPI docs (better than Swagger UI)
+  </Card>
+  <Card title="Serilog" icon="file-lines">
+    Structured logging with OpenTelemetry sink
+  </Card>
+  <Card title="Aspire" icon="rocket">
+    Local orchestration for Postgres + Redis + API
+  </Card>
+</CardGroup>
+
+## Philosophy
+
+From `src/CLAUDE.md:138`:
+
+> **This is a production-ready starter kit. Every pattern is battle-tested. Follow the conventions, and you'll ship faster.**
+
+<Note>
+  FullStackHero is maintained by **Mukesh Murugan** for teams that want to ship faster without sacrificing architecture discipline.
+</Note>
+
+<Card title="Ready to Start?" icon="rocket" href="/quickstart">
+  Get a working API running in under 5 minutes with the Quickstart guide
+</Card>

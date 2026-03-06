@@ -1,0 +1,407 @@
+---
+title: API Versioning
+description: Manage API versions with URL segment versioning
+icon: code-branch
+---
+
+FullStackHero provides built-in API versioning using [Asp.Versioning](https://github.com/dotnet/aspnet-api-versioning), enabling you to evolve your API while maintaining backward compatibility.
+
+## Overview
+
+The API versioning system provides:
+
+- **URL Segment Versioning**: Version identifiers in the URL path (e.g., `/api/v1/users`)
+- **Default Versioning**: Automatic fallback to v1.0 when no version is specified
+- **API Explorer Integration**: Versioned OpenAPI/Swagger documentation
+- **Version Reporting**: Response headers indicate supported versions
+
+## Configuration
+
+API versioning is configured in the Web building block:
+
+```csharp Extensions.cs
+public static IServiceCollection AddHeroVersioning(
+    this IServiceCollection services)
+{
+    services
+        .AddApiVersioning(options =>
+        {
+            options.ReportApiVersions = true;
+            options.DefaultApiVersion = new ApiVersion(1, 0);
+            options.AssumeDefaultVersionWhenUnspecified = true;
+            options.ApiVersionReader = new UrlSegmentApiVersionReader();
+        })
+        .AddApiExplorer(options =>
+        {
+            options.GroupNameFormat = "'v'VVV";
+            options.SubstituteApiVersionInUrl = true;
+        })
+        .EnableApiVersionBinding();
+    
+    return services;
+}
+```
+
+### Configuration Options
+
+<ParamField path="ReportApiVersions" type="bool" default="true">
+  Include `api-supported-versions` and `api-deprecated-versions` headers in responses.
+</ParamField>
+
+<ParamField path="DefaultApiVersion" type="ApiVersion" default="1.0">
+  The default API version when the client doesn't specify one.
+</ParamField>
+
+<ParamField path="AssumeDefaultVersionWhenUnspecified" type="bool" default="true">
+  Use the default version when no version is provided in the request.
+</ParamField>
+
+<ParamField path="ApiVersionReader" type="IApiVersionReader">
+  How to read the API version from the request. Uses `UrlSegmentApiVersionReader` for URL-based versioning.
+</ParamField>
+
+## URL Segment Versioning
+
+API versions are specified in the URL path:
+
+```
+GET /api/v1/users
+GET /api/v2/users
+GET /api/v3/users
+```
+
+This is the most explicit and cache-friendly versioning strategy.
+
+## Defining API Versions
+
+### Version Sets
+
+Group related endpoints under a version set:
+
+```csharp
+var versionSet = app.NewApiVersionSet()
+    .HasApiVersion(new ApiVersion(1, 0))
+    .HasApiVersion(new ApiVersion(2, 0))
+    .ReportApiVersions()
+    .Build();
+
+var group = app.MapGroup("/api/v{version:apiVersion}/users")
+    .WithApiVersionSet(versionSet);
+```
+
+### Versioned Endpoints
+
+Map endpoints to specific API versions:
+
+```csharp
+// V1 endpoint
+group.MapGet("/", GetUsersV1)
+    .MapToApiVersion(new ApiVersion(1, 0))
+    .WithName("GetUsers_v1")
+    .WithSummary("Get users (v1)");
+
+// V2 endpoint with enhanced response
+group.MapGet("/", GetUsersV2)
+    .MapToApiVersion(new ApiVersion(2, 0))
+    .WithName("GetUsers_v2")
+    .WithSummary("Get users (v2 - includes profile pictures)");
+```
+
+## Versioning Strategies
+
+### Feature Module Structure
+
+Organize versions within feature folders:
+
+```
+Modules/Identity/Features/
+├── v1/
+│   ├── Users/
+│   │   ├── GetUser/
+│   │   │   ├── GetUserQuery.cs
+│   │   │   ├── GetUserHandler.cs
+│   │   │   └── GetUserEndpoint.cs
+│   └── Tokens/
+│       ├── GenerateToken/
+│       └── RefreshToken/
+├── v2/
+│   ├── Users/
+│   │   ├── GetUser/
+│   │   │   ├── GetUserQuery.cs       # V2 with enhanced fields
+│   │   │   ├── GetUserHandler.cs
+│   │   │   └── GetUserEndpoint.cs
+│   └── ...
+```
+
+<Note>
+  FullStackHero uses this approach: each version is a separate folder under the feature's `Features` directory.
+</Note>
+
+### Shared Code
+
+Extract common logic to shared services or base classes:
+
+```csharp
+// Shared service used by both v1 and v2
+public class UserService
+{
+    public async Task<User> GetUserByIdAsync(Guid id, CancellationToken ct)
+    {
+        // Common user retrieval logic
+    }
+}
+
+// V1 handler
+public class GetUserV1Handler : IQueryHandler<GetUserV1Query, UserV1Response>
+{
+    private readonly UserService _userService;
+
+    public async ValueTask<UserV1Response> Handle(
+        GetUserV1Query query, CancellationToken ct)
+    {
+        var user = await _userService.GetUserByIdAsync(query.UserId, ct);
+        return new UserV1Response(user.Id, user.Name, user.Email);
+    }
+}
+
+// V2 handler with extended response
+public class GetUserV2Handler : IQueryHandler<GetUserV2Query, UserV2Response>
+{
+    private readonly UserService _userService;
+
+    public async ValueTask<UserV2Response> Handle(
+        GetUserV2Query query, CancellationToken ct)
+    {
+        var user = await _userService.GetUserByIdAsync(query.UserId, ct);
+        return new UserV2Response(
+            user.Id, 
+            user.Name, 
+            user.Email, 
+            user.ProfilePictureUrl, // New in V2
+            user.CreatedAt);         // New in V2
+    }
+}
+```
+
+## Response Headers
+
+When `ReportApiVersions` is enabled, responses include version information:
+
+```http
+HTTP/1.1 200 OK
+api-supported-versions: 1.0, 2.0
+api-deprecated-versions: (none)
+```
+
+<ParamField path="api-supported-versions">
+  Comma-separated list of supported API versions
+</ParamField>
+
+<ParamField path="api-deprecated-versions">
+  Comma-separated list of deprecated API versions
+</ParamField>
+
+## Deprecating API Versions
+
+Mark versions as deprecated:
+
+```csharp
+var versionSet = app.NewApiVersionSet()
+    .HasDeprecatedApiVersion(new ApiVersion(1, 0)) // Deprecated
+    .HasApiVersion(new ApiVersion(2, 0))
+    .HasApiVersion(new ApiVersion(3, 0))
+    .ReportApiVersions()
+    .Build();
+```
+
+Deprecated versions still work but are marked in response headers:
+
+```http
+api-deprecated-versions: 1.0
+```
+
+<Warning>
+  Communicate deprecation timelines to API consumers well in advance. Provide migration guides to newer versions.
+</Warning>
+
+## OpenAPI/Swagger Integration
+
+API versions are automatically reflected in OpenAPI/Swagger documentation:
+
+- **Separate Specs**: Each version gets its own OpenAPI specification
+- **Version Selector**: Swagger UI includes a version dropdown
+- **Substitution**: The `{version:apiVersion}` placeholder is replaced with the actual version
+
+```json
+{
+  "openapi": "3.0.1",
+  "info": {
+    "title": "FSH API",
+    "version": "v1"
+  },
+  "paths": {
+    "/api/v1/users": { ... },
+    "/api/v1/users/{id}": { ... }
+  }
+}
+```
+
+<Card title="OpenAPI" icon="book-open" href="/features/api-versioning">
+  Learn more about OpenAPI configuration and documentation
+</Card>
+
+## Example: Versioning a Feature
+
+Let's version the "Get User" endpoint:
+
+<Steps>
+  <Step title="Create V1 Implementation">
+    ```csharp v1/GetUser/GetUserEndpoint.cs
+    public static RouteHandlerBuilder MapGetUserEndpoint(
+        this IEndpointRouteBuilder endpoints)
+    {
+        return endpoints.MapGet("/users/{id:guid}",
+            async (Guid id, IMediator mediator, CancellationToken ct) =>
+            {
+                var query = new GetUserV1Query(id);
+                var result = await mediator.Send(query, ct);
+                return TypedResults.Ok(result);
+            })
+            .MapToApiVersion(new ApiVersion(1, 0))
+            .WithName("GetUser_v1")
+            .RequirePermission("users.view");
+    }
+    ```
+  </Step>
+
+  <Step title="Add V2 with Breaking Changes">
+    ```csharp v2/GetUser/GetUserEndpoint.cs
+    public static RouteHandlerBuilder MapGetUserEndpoint(
+        this IEndpointRouteBuilder endpoints)
+    {
+        return endpoints.MapGet("/users/{id:guid}",
+            async (Guid id, IMediator mediator, CancellationToken ct) =>
+            {
+                var query = new GetUserV2Query(id);
+                var result = await mediator.Send(query, ct);
+                return TypedResults.Ok(result);
+            })
+            .MapToApiVersion(new ApiVersion(2, 0))
+            .WithName("GetUser_v2")
+            .RequirePermission("users.view");
+    }
+    ```
+  </Step>
+
+  <Step title="Define Version Set">
+    ```csharp
+    var versionSet = app.NewApiVersionSet()
+        .HasApiVersion(new ApiVersion(1, 0))
+        .HasApiVersion(new ApiVersion(2, 0))
+        .ReportApiVersions()
+        .Build();
+
+    var group = app.MapGroup("/api/v{version:apiVersion}")
+        .WithApiVersionSet(versionSet);
+    
+    group.MapGetUserEndpoint();
+    ```
+  </Step>
+
+  <Step title="Register Endpoints">
+    Both v1 and v2 handlers are registered in the DI container and routed based on the URL version.
+  </Step>
+</Steps>
+
+## Version Negotiation
+
+### Explicit Version
+
+Client specifies the exact version:
+
+```bash
+GET /api/v2/users HTTP/1.1
+```
+
+### Default Version
+
+Client omits the version (uses default v1.0):
+
+```bash
+GET /api/users HTTP/1.1
+```
+
+This is only possible when `AssumeDefaultVersionWhenUnspecified` is `true`.
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use Semantic Versioning">
+    Follow semantic versioning principles:
+    - **Major version** (v1, v2, v3): Breaking changes
+    - **Minor version** (v1.1, v1.2): Backward-compatible features
+    - **Patch version** (v1.0.1): Backward-compatible bug fixes
+  </Accordion>
+
+  <Accordion title="Avoid Breaking Changes in Minor Versions">
+    Only introduce breaking changes in major versions. Minor and patch versions should be backward-compatible.
+  </Accordion>
+
+  <Accordion title="Deprecate Before Removing">
+    Mark versions as deprecated for at least one release cycle before removing them.
+  </Accordion>
+
+  <Accordion title="Document Changes Between Versions">
+    Maintain a changelog that clearly documents what changed in each version.
+  </Accordion>
+
+  <Accordion title="Test Across Versions">
+    Write integration tests for each supported API version to ensure they work independently.
+  </Accordion>
+</AccordionGroup>
+
+## Testing Versioned APIs
+
+Test that version routing works correctly:
+
+```csharp
+[Theory]
+[InlineData("v1", "UserV1Response")]
+[InlineData("v2", "UserV2Response")]
+public async Task GetUser_ReturnsCorrectVersion(
+    string version, string expectedType)
+{
+    // Arrange
+    var client = _factory.CreateClient();
+    var userId = Guid.NewGuid();
+
+    // Act
+    var response = await client.GetAsync(
+        $"/api/{version}/users/{userId}");
+
+    // Assert
+    response.EnsureSuccessStatusCode();
+    var content = await response.Content.ReadAsStringAsync();
+    Assert.Contains(expectedType, content);
+}
+```
+
+## Related Topics
+
+<CardGroup cols={2}>
+  <Card title="OpenAPI" icon="book-open" href="/features/api-versioning">
+    Generate versioned OpenAPI specifications
+  </Card>
+
+  <Card title="Endpoints" icon="route" href="/development/endpoints">
+    Learn about endpoint mapping and routing
+  </Card>
+
+  <Card title="CQRS" icon="arrows-split-up-and-left" href="/architecture/cqrs-mediator">
+    Understand command and query patterns in versioned features
+  </Card>
+
+  <Card title="Testing" icon="vial" href="/development/testing">
+    Write tests for versioned APIs
+  </Card>
+</CardGroup>

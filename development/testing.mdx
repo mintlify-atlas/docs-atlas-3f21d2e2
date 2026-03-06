@@ -1,0 +1,601 @@
+---
+title: Testing
+description: Architecture tests and unit testing patterns for the starter kit
+---
+
+## Overview
+
+FullStackHero includes comprehensive testing strategies to ensure code quality and architectural compliance:
+
+- **Architecture Tests** - Enforce architectural rules and conventions
+- **Unit Tests** - Test individual handlers, validators, and services
+- **Integration Tests** - Test features end-to-end
+
+## Test Project Structure
+
+```
+src/Tests/
+├── Architecture.Tests/          # Architecture and convention tests
+│   ├── FeatureArchitectureTests.cs
+│   ├── HandlerValidatorPairingTests.cs
+│   ├── LayerDependencyTests.cs
+│   └── ...
+├── Identity.Tests/              # Identity module unit tests
+│   ├── Handlers/
+│   │   ├── ChangePasswordCommandHandlerTests.cs
+│   │   └── GenerateTokenCommandHandlerTests.cs
+│   └── Validators/
+├── Multitenancy.Tests/          # Multitenancy module tests
+├── Auditing.Tests/              # Auditing module tests
+└── Generic.Tests/               # Shared test utilities
+```
+
+## Architecture Tests
+
+Architecture tests use **NetArchTest** to enforce design rules and conventions.
+
+### Feature Architecture Tests
+
+Ensure features don't depend on newer API versions:
+
+```csharp title="FeatureArchitectureTests.cs"
+using FSH.Modules.Auditing;
+using FSH.Modules.Identity;
+using FSH.Modules.Multitenancy;
+using NetArchTest.Rules;
+using Shouldly;
+using Xunit;
+
+namespace Architecture.Tests;
+
+public class FeatureArchitectureTests
+{
+    [Fact]
+    public void Features_Versions_Should_Not_Depend_On_Newer_Versions()
+    {
+        var modules = new[]
+        {
+            typeof(AuditingModule).Assembly,
+            typeof(IdentityModule).Assembly,
+            typeof(MultitenancyModule).Assembly
+        };
+
+        foreach (var module in modules)
+        {
+            var v1Result = Types
+                .InAssembly(module)
+                .That()
+                .ResideInNamespaceEndingWith(".Features.v1")
+                .Should()
+                .NotHaveDependencyOnAny(
+                    ".Features.v2",
+                    ".Features.v3")
+                .GetResult();
+
+            var failingTypes = v1Result.FailingTypeNames ?? Array.Empty<string>();
+
+            v1Result.IsSuccessful.ShouldBeTrue(
+                $"v1 features in assembly '{module.FullName}' must not depend on newer feature versions. " +
+                $"Failing types: {string.Join(", ", failingTypes)}");
+        }
+    }
+}
+```
+
+### Handler-Validator Pairing Tests
+
+Ensure every command has a corresponding validator:
+
+```csharp title="HandlerValidatorPairingTests.cs"
+using FSH.Modules.Auditing;
+using FSH.Modules.Identity;
+using FSH.Modules.Multitenancy;
+using Mediator;
+using Shouldly;
+using System.Reflection;
+using Xunit;
+
+namespace Architecture.Tests;
+
+public class HandlerValidatorPairingTests
+{
+    private static readonly Assembly[] ModuleAssemblies =
+    [
+        typeof(AuditingModule).Assembly,
+        typeof(IdentityModule).Assembly,
+        typeof(MultitenancyModule).Assembly
+    ];
+
+    [Fact]
+    public void CommandHandlers_Should_Have_Corresponding_Validators()
+    {
+        var missingValidators = new List<string>();
+
+        foreach (var module in ModuleAssemblies)
+        {
+            // Find all command handler types
+            var commandHandlerTypes = module.GetTypes()
+                .Where(t => t.IsClass && !t.IsAbstract)
+                .Where(t => t.GetInterfaces().Any(i =>
+                    i.IsGenericType &&
+                    (i.GetGenericTypeDefinition() == typeof(ICommandHandler<>) ||
+                     i.GetGenericTypeDefinition() == typeof(ICommandHandler<,>))));
+
+            foreach (var handlerType in commandHandlerTypes)
+            {
+                // Extract the command type from the handler interface
+                var handlerInterface = handlerType.GetInterfaces()
+                    .FirstOrDefault(i => i.IsGenericType &&
+                        (i.GetGenericTypeDefinition() == typeof(ICommandHandler<>) ||
+                         i.GetGenericTypeDefinition() == typeof(ICommandHandler<,>)));
+
+                if (handlerInterface == null) continue;
+
+                var commandType = handlerInterface.GetGenericArguments()[0];
+                var commandName = commandType.Name;
+
+                // Look for a validator
+                var expectedValidatorName = commandName + "Validator";
+
+                var validatorExists = module.GetTypes()
+                    .Any(t => t.Name == expectedValidatorName);
+
+                if (!validatorExists)
+                {
+                    missingValidators.Add($"{handlerType.FullName} -> missing {expectedValidatorName}");
+                }
+            }
+        }
+
+        if (missingValidators.Count > 0)
+        {
+            var message = $"Found {missingValidators.Count} command handler(s) without validators:\n" +
+                         string.Join("\n", missingValidators.Take(20));
+            
+            message.ShouldBeEmpty(); // This will fail with the message
+        }
+    }
+}
+```
+
+### Running Architecture Tests
+
+```bash
+dotnet test src/Tests/Architecture.Tests
+```
+
+These tests run in CI and will block pull requests if they fail.
+
+## Unit Tests
+
+Unit tests verify individual components in isolation using mocks and test doubles.
+
+### Handler Unit Tests
+
+Test command/query handlers using NSubstitute for mocking:
+
+```csharp title="ChangePasswordCommandHandlerTests.cs"
+using AutoFixture;
+using FSH.Framework.Core.Context;
+using FSH.Modules.Identity.Contracts.Services;
+using FSH.Modules.Identity.Contracts.v1.Users.ChangePassword;
+using FSH.Modules.Identity.Features.v1.Users.ChangePassword;
+using NSubstitute;
+using NSubstitute.ExceptionExtensions;
+
+namespace Identity.Tests.Handlers;
+
+public sealed class ChangePasswordCommandHandlerTests
+{
+    private readonly IUserService _userService;
+    private readonly ICurrentUser _currentUser;
+    private readonly ChangePasswordCommandHandler _sut;
+    private readonly IFixture _fixture;
+
+    public ChangePasswordCommandHandlerTests()
+    {
+        _userService = Substitute.For<IUserService>();
+        _currentUser = Substitute.For<ICurrentUser>();
+        _sut = new ChangePasswordCommandHandler(_userService, _currentUser);
+        _fixture = new Fixture();
+    }
+
+    [Fact]
+    public async Task Handle_Should_ReturnSuccessMessage_When_PasswordIsChangedSuccessfully()
+    {
+        // Arrange
+        var command = new ChangePasswordCommand
+        {
+            Password = "CurrentPassword123!",
+            NewPassword = "NewPassword456!",
+            ConfirmNewPassword = "NewPassword456!"
+        };
+
+        var userId = _fixture.Create<Guid>();
+
+        _currentUser.IsAuthenticated().Returns(true);
+        _currentUser.GetUserId().Returns(userId);
+
+        _userService.ChangePasswordAsync(command.Password, command.NewPassword, 
+            command.ConfirmNewPassword, userId.ToString())
+            .Returns(Task.CompletedTask);
+
+        // Act
+        var result = await _sut.Handle(command, CancellationToken.None);
+
+        // Assert
+        result.ShouldBe("password reset email sent");
+    }
+
+    [Fact]
+    public async Task Handle_Should_CallUserServiceWithCorrectParameters_When_PasswordChangeIsRequested()
+    {
+        // Arrange
+        var command = new ChangePasswordCommand
+        {
+            Password = "OldPassword123!",
+            NewPassword = "NewPassword456!",
+            ConfirmNewPassword = "NewPassword456!"
+        };
+
+        var userId = _fixture.Create<Guid>();
+
+        _currentUser.IsAuthenticated().Returns(true);
+        _currentUser.GetUserId().Returns(userId);
+
+        _userService.ChangePasswordAsync(Arg.Any<string>(), Arg.Any<string>(), 
+            Arg.Any<string>(), Arg.Any<string>())
+            .Returns(Task.CompletedTask);
+
+        // Act
+        await _sut.Handle(command, CancellationToken.None);
+
+        // Assert
+        await _userService.Received(1).ChangePasswordAsync(
+            command.Password,
+            command.NewPassword,
+            command.ConfirmNewPassword,
+            userId.ToString());
+    }
+
+    [Fact]
+    public async Task Handle_Should_ThrowInvalidOperationException_When_UserIsNotAuthenticated()
+    {
+        // Arrange
+        var command = new ChangePasswordCommand
+        {
+            Password = "CurrentPassword123!",
+            NewPassword = "NewPassword456!",
+            ConfirmNewPassword = "NewPassword456!"
+        };
+
+        _currentUser.IsAuthenticated().Returns(false);
+
+        // Act & Assert
+        var exception = await Should.ThrowAsync<InvalidOperationException>(
+            async () => await _sut.Handle(command, CancellationToken.None));
+
+        exception.Message.ShouldBe("User is not authenticated.");
+    }
+
+    [Fact]
+    public async Task Handle_Should_ThrowException_When_UserServiceThrows()
+    {
+        // Arrange
+        var command = new ChangePasswordCommand
+        {
+            Password = "WrongPassword123!",
+            NewPassword = "NewPassword456!",
+            ConfirmNewPassword = "NewPassword456!"
+        };
+
+        var userId = _fixture.Create<Guid>();
+
+        _currentUser.IsAuthenticated().Returns(true);
+        _currentUser.GetUserId().Returns(userId);
+
+        var expectedExceptionMessage = "Current password is incorrect";
+        _userService.ChangePasswordAsync(command.Password, command.NewPassword, 
+            command.ConfirmNewPassword, userId.ToString())
+            .ThrowsAsync(new UnauthorizedAccessException(expectedExceptionMessage));
+
+        // Act & Assert
+        var exception = await Should.ThrowAsync<UnauthorizedAccessException>(
+            async () => await _sut.Handle(command, CancellationToken.None));
+
+        exception.Message.ShouldBe(expectedExceptionMessage);
+    }
+
+    [Fact]
+    public async Task Handle_Should_ThrowArgumentNullException_When_CommandIsNull()
+    {
+        // Act & Assert
+        await Should.ThrowAsync<ArgumentNullException>(async () =>
+            await _sut.Handle(null!, CancellationToken.None));
+    }
+}
+```
+
+### Validator Unit Tests
+
+Test validators using FluentValidation's test helpers:
+
+```csharp title="CreateGroupCommandValidatorTests.cs"
+using FluentValidation.TestHelper;
+using FSH.Modules.Identity.Contracts.v1.Groups.CreateGroup;
+using FSH.Modules.Identity.Features.v1.Groups.CreateGroup;
+using Xunit;
+
+namespace Identity.Tests.Validators;
+
+public sealed class CreateGroupCommandValidatorTests
+{
+    private readonly CreateGroupCommandValidator _validator;
+
+    public CreateGroupCommandValidatorTests()
+    {
+        _validator = new CreateGroupCommandValidator();
+    }
+
+    [Fact]
+    public void Should_Have_Error_When_Name_Is_Empty()
+    {
+        // Arrange
+        var command = new CreateGroupCommand("", "Description", false, null);
+
+        // Act
+        var result = _validator.TestValidate(command);
+
+        // Assert
+        result.ShouldHaveValidationErrorFor(x => x.Name)
+            .WithErrorMessage("Group name is required.");
+    }
+
+    [Fact]
+    public void Should_Have_Error_When_Name_Exceeds_MaxLength()
+    {
+        // Arrange
+        var longName = new string('A', 257);
+        var command = new CreateGroupCommand(longName, null, false, null);
+
+        // Act
+        var result = _validator.TestValidate(command);
+
+        // Assert
+        result.ShouldHaveValidationErrorFor(x => x.Name)
+            .WithErrorMessage("Group name must not exceed 256 characters.");
+    }
+
+    [Fact]
+    public void Should_Not_Have_Error_When_Command_Is_Valid()
+    {
+        // Arrange
+        var command = new CreateGroupCommand("Admins", "Admin group", false, null);
+
+        // Act
+        var result = _validator.TestValidate(command);
+
+        // Assert
+        result.ShouldNotHaveAnyValidationErrors();
+    }
+
+    [Fact]
+    public void Should_Have_Error_When_Description_Exceeds_MaxLength()
+    {
+        // Arrange
+        var longDescription = new string('A', 1025);
+        var command = new CreateGroupCommand("Admins", longDescription, false, null);
+
+        // Act
+        var result = _validator.TestValidate(command);
+
+        // Assert
+        result.ShouldHaveValidationErrorFor(x => x.Description)
+            .WithErrorMessage("Description must not exceed 1024 characters.");
+    }
+}
+```
+
+## Testing Tools
+
+### NuGet Packages
+
+```xml title="Identity.Tests.csproj"
+<ItemGroup>
+    <!-- Test framework -->
+    <PackageReference Include="xunit" Version="2.6.6" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.5.6" />
+    
+    <!-- Assertion library -->
+    <PackageReference Include="Shouldly" Version="4.2.1" />
+    
+    <!-- Mocking library -->
+    <PackageReference Include="NSubstitute" Version="5.1.0" />
+    
+    <!-- Test data generation -->
+    <PackageReference Include="AutoFixture" Version="4.18.1" />
+    
+    <!-- Validator testing -->
+    <PackageReference Include="FluentValidation.TestHelper" Version="11.9.0" />
+    
+    <!-- Architecture tests -->
+    <PackageReference Include="NetArchTest.Rules" Version="1.3.2" />
+</ItemGroup>
+```
+
+### Key Libraries
+
+<CardGroup cols={2}>
+  <Card title="xUnit" icon="vial">
+    Test framework for writing and running tests
+  </Card>
+  <Card title="Shouldly" icon="check">
+    Fluent assertion library with readable error messages
+  </Card>
+  <Card title="NSubstitute" icon="masks-theater">
+    Mocking library for creating test doubles
+  </Card>
+  <Card title="AutoFixture" icon="wand-magic-sparkles">
+    Generate test data automatically
+  </Card>
+</CardGroup>
+
+## Test Patterns
+
+### AAA Pattern (Arrange-Act-Assert)
+
+```csharp
+[Fact]
+public async Task Handle_Should_CreateGroup_When_ValidCommandProvided()
+{
+    // Arrange - Set up test data and mocks
+    var command = new CreateGroupCommand("Admins", "Admin group", false, null);
+    var userId = Guid.NewGuid();
+    _currentUser.GetUserId().Returns(userId);
+    
+    // Act - Execute the code under test
+    var result = await _handler.Handle(command, CancellationToken.None);
+    
+    // Assert - Verify the results
+    result.ShouldNotBeNull();
+    result.Name.ShouldBe("Admins");
+}
+```
+
+### Test Naming Convention
+
+```
+{MethodName}_Should_{ExpectedBehavior}_When_{Condition}
+```
+
+**Examples:**
+- `Handle_Should_ReturnGroup_When_ValidIdProvided`
+- `Validate_Should_FailValidation_When_NameIsEmpty`
+- `Create_Should_ThrowException_When_DuplicateNameExists`
+
+## Running Tests
+
+### Run All Tests
+
+```bash
+dotnet test src/FSH.Framework.slnx
+```
+
+### Run Specific Test Project
+
+```bash
+dotnet test src/Tests/Identity.Tests
+dotnet test src/Tests/Architecture.Tests
+```
+
+### Run Specific Test
+
+```bash
+dotnet test --filter "FullyQualifiedName~ChangePasswordCommandHandlerTests.Handle_Should_ReturnSuccessMessage"
+```
+
+### Run with Coverage
+
+```bash
+dotnet test /p:CollectCoverage=true /p:CoverletOutputFormat=opencover
+```
+
+## CI/CD Integration
+
+Tests run automatically in GitHub Actions:
+
+```yaml title=".github/workflows/test.yml"
+name: Test
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: '9.0.x'
+      
+      - name: Restore dependencies
+        run: dotnet restore src/FSH.Framework.slnx
+      
+      - name: Build
+        run: dotnet build src/FSH.Framework.slnx --no-restore
+      
+      - name: Test
+        run: dotnet test src/FSH.Framework.slnx --no-build --verbosity normal
+```
+
+## Best Practices
+
+<Steps>
+
+### Write Tests First (TDD)
+
+Consider writing tests before implementation:
+
+1. Write failing test
+2. Implement minimal code to pass
+3. Refactor while keeping tests green
+
+### Test One Thing
+
+Each test should verify one specific behavior:
+
+```csharp
+// Good - tests one thing
+[Fact]
+public void Should_Throw_When_Name_Is_Empty() { }
+
+// Bad - tests multiple things
+[Fact]
+public void Should_Validate_All_Fields() { }
+```
+
+### Use Descriptive Names
+
+```csharp
+// Good
+[Fact]
+public async Task Handle_Should_ThrowNotFoundException_When_GroupDoesNotExist()
+
+// Bad
+[Fact]
+public async Task Test1()
+```
+
+### Mock External Dependencies
+
+Mock all external dependencies (databases, APIs, file system):
+
+```csharp
+var userService = Substitute.For<IUserService>();
+var dbContext = Substitute.For<IDbContext>();
+```
+
+### Keep Tests Fast
+
+Unit tests should run in milliseconds:
+- No actual database calls
+- No file I/O
+- No network requests
+
+</Steps>
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="Creating Features" href="/development/creating-features" icon="code">
+    Build testable features
+  </Card>
+  <Card title="Validation" href="/development/validation" icon="shield-check">
+    Test validators thoroughly
+  </Card>
+  <Card title="CI/CD" href="/deployment/docker" icon="gears">
+    Automate testing in CI/CD
+  </Card>
+</CardGroup>

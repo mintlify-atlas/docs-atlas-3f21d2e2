@@ -1,0 +1,534 @@
+---
+title: Project Structure
+description: Understanding the FullStackHero .NET Starter Kit codebase organization
+icon: folder-tree
+---
+
+The FullStackHero starter kit follows a **modular monolith** architecture with clear separation between reusable building blocks, domain modules, and application hosts.
+
+## Repository Overview
+
+```bash
+.
+├── src/
+│   ├── BuildingBlocks/        # Framework (11 packages)
+│   ├── Modules/               # Business features (3 core modules)
+│   ├── Playground/            # Reference application
+│   ├── Tests/                 # Architecture + unit tests
+│   ├── Tools/                 # CLI utilities
+│   ├── Directory.Build.props  # Global MSBuild properties
+│   ├── Directory.Packages.props  # Centralized package versions
+│   └── FSH.Framework.slnx     # Solution file
+├── docs/                      # Documentation (this site)
+├── terraform/                 # Infrastructure as Code
+└── scripts/                   # Build/deployment scripts
+```
+
+## Build Configuration
+
+The repository uses **Central Package Management** to ensure consistent versions across all projects.
+
+### Directory.Build.props
+
+Global MSBuild properties applied to all projects:
+
+```xml src/Directory.Build.props
+<Project>
+  <PropertyGroup>
+    <!-- Target framework -->
+    <TargetFramework>net10.0</TargetFramework>
+
+    <!-- Enable latest C# features -->
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+
+    <!-- Code quality -->
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <AnalysisLevel>latest</AnalysisLevel>
+    <AnalysisMode>AllEnabledByDefault</AnalysisMode>
+
+    <!-- Versioning -->
+    <Version>10.0.0-rc.1</Version>
+    <Authors>Mukesh Murugan</Authors>
+    <Company>FullStackHero</Company>
+  </PropertyGroup>
+</Project>
+```
+
+Key features:
+- **net10.0**: All projects target .NET 10
+- **Nullable reference types** enabled by default
+- **Implicit usings** for common namespaces
+- **Code analysis** enforced at build time
+
+### Directory.Packages.props
+
+Centralized package version management (CPM):
+
+```xml src/Directory.Packages.props (excerpt)
+<Project>
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+  
+  <ItemGroup>
+    <PackageVersion Include="Microsoft.EntityFrameworkCore" Version="10.0.2" />
+    <PackageVersion Include="Finbuckle.MultiTenant" Version="10.0.2" />
+    <PackageVersion Include="Mediator.Abstractions" Version="3.0.1" />
+    <PackageVersion Include="Hangfire.Core" Version="1.8.23" />
+    <!-- ... 100+ packages -->
+  </ItemGroup>
+</Project>
+```
+
+Projects reference packages **without** versions:
+
+```xml Example: Playground.Api.csproj
+<ItemGroup>
+  <PackageReference Include="Microsoft.EntityFrameworkCore.Design" />
+  <PackageReference Include="Mediator.Abstractions" />
+</ItemGroup>
+```
+
+## src/BuildingBlocks/
+
+Reusable framework packages providing cross-cutting concerns. These are **protected** and should not be modified unless extending the framework.
+
+```bash
+src/BuildingBlocks/
+├── Core/                      # DDD primitives, exceptions, context
+├── Persistence/               # EF Core, repository, specifications
+├── Caching/                   # Redis + in-memory caching
+├── Eventing/                  # Domain events, inbox/outbox
+├── Eventing.Abstractions/     # Event contracts
+├── Jobs/                      # Hangfire background jobs
+├── Mailing/                   # SMTP + SendGrid email
+├── Storage/                   # Local/S3/Azure file storage
+├── Shared/                    # DTOs, shared contracts
+├── Web/                       # ASP.NET Core host, auth, validation
+├── Blazor.UI/                 # Blazor components
+└── (11 total packages)
+```
+
+### Core
+
+Domain-Driven Design primitives and abstractions:
+
+```bash
+BuildingBlocks/Core/
+├── Abstractions/              # IAppUser, IClock, etc.
+├── Context/                   # ICurrentUser, IRequestContext
+├── Domain/                    # BaseEntity, AggregateRoot, ValueObject
+├── Exceptions/                # Custom exception types
+└── Common/                    # QueryStringKeys, constants
+```
+
+Key types:
+- **`BaseEntity<TId>`**: Base class for entities with ID and audit fields
+- **`AggregateRoot<TId>`**: Root entity with domain events
+- **`ValueObject`**: Base class for value objects
+- **`ICurrentUser`**: Access to authenticated user claims
+
+### Persistence
+
+Entity Framework Core infrastructure:
+
+```bash
+BuildingBlocks/Persistence/
+├── Context/                   # DbContext base classes
+├── Inteceptors/               # EF Core interceptors (audit, events)
+├── Specifications/            # Repository specification pattern
+├── Pagination/                # PaginatedList<T>
+└── Repository/                # IRepository<T>, IReadRepository<T>
+```
+
+Key features:
+- **`BaseDbContext`**: Multi-tenant aware DbContext
+- **`IRepository<T>`**: Generic repository with specification support
+- **`Specification<T>`**: Reusable query specifications
+- **Audit interceptor**: Auto-populates `CreatedBy`, `ModifiedBy`, etc.
+
+### Caching
+
+Distributed and in-memory caching:
+
+```bash
+BuildingBlocks/Caching/
+├── CacheService.cs            # IDistributedCache wrapper
+├── MemoryCacheService.cs      # IMemoryCache wrapper
+└── Extensions.cs              # DI registration
+```
+
+Usage:
+```csharp
+public class MyHandler(ICacheService cache)
+{
+    public async Task<Data> Handle(Query q, CancellationToken ct)
+    {
+        return await cache.GetOrSetAsync(
+            $"data:{q.Id}",
+            () => _repo.GetByIdAsync(q.Id, ct),
+            TimeSpan.FromMinutes(5),
+            ct);
+    }
+}
+```
+
+### Web
+
+ASP.NET Core host infrastructure:
+
+```bash
+BuildingBlocks/Web/
+├── Auth/                      # JWT bearer authentication
+├── Cors/                      # CORS configuration
+├── Exceptions/                # Global exception handling
+├── Health/                    # Health check endpoints
+├── Mediator/                  # Mediator integration
+├── Modules/                   # Module loader
+├── Observability/             # OpenTelemetry setup
+├── OpenApi/                   # Swagger/Scalar configuration
+├── RateLimiting/              # Rate limiting policies
+├── Security/                  # Security headers, CSP
+├── Validation/                # FluentValidation pipeline
+└── Versioning/                # API versioning
+```
+
+Key method:
+```csharp
+builder.AddHeroPlatform(o =>
+{
+    o.EnableCaching = true;
+    o.EnableMailing = true;
+    o.EnableJobs = true;
+});
+```
+
+This single call wires:
+- JWT authentication
+- CORS
+- OpenAPI
+- Health checks
+- Rate limiting
+- OpenTelemetry
+- Exception handling
+- Validation
+
+## src/Modules/
+
+Business features organized as bounded contexts. Each module is self-contained with its own:
+- Domain models
+- Database context
+- API endpoints
+- Contracts (DTOs)
+
+```bash
+src/Modules/
+├── Identity/
+│   ├── Modules.Identity/              # Runtime implementation
+│   │   ├── Authorization/             # JWT, permissions, roles
+│   │   ├── Data/                      # IdentityDbContext, configurations
+│   │   ├── Domain/                    # User, Role entities
+│   │   ├── Features/v1/               # CQRS features
+│   │   │   ├── Tokens/TokenGeneration/
+│   │   │   ├── Users/CreateUser/
+│   │   │   ├── Roles/CreateRole/
+│   │   │   └── ...
+│   │   ├── Services/                  # UserService, RoleService
+│   │   └── IdentityModule.cs          # Module registration
+│   └── Modules.Identity.Contracts/    # Public DTOs/interfaces
+│       └── v1/Tokens/TokenGeneration/
+├── Multitenancy/
+│   ├── Modules.Multitenancy/
+│   │   ├── Data/                      # TenantDbContext
+│   │   ├── Domain/                    # Tenant entity
+│   │   ├── Features/v1/
+│   │   │   ├── GetTenantStatus/
+│   │   │   ├── CreateTenant/
+│   │   │   └── ...
+│   │   └── MultitenancyModule.cs
+│   └── Modules.Multitenancy.Contracts/
+└── Auditing/
+    ├── Modules.Auditing/
+    │   ├── Persistence/               # AuditDbContext
+    │   ├── Features/v1/
+    │   │   ├── GetAuditTrail/
+    │   │   └── ...
+    │   └── AuditingModule.cs
+    └── Modules.Auditing.Contracts/
+```
+
+### Module Pattern
+
+Each module follows vertical slice architecture:
+
+```bash
+Modules/{Module}/Features/v1/{Feature}/
+├── {Action}{Entity}Command.cs         # ICommand<T> or IQuery<T>
+├── {Action}{Entity}Handler.cs         # ICommandHandler<T,R>
+├── {Action}{Entity}Validator.cs       # AbstractValidator<T>
+└── {Action}{Entity}Endpoint.cs        # Minimal API endpoint
+```
+
+Example: `CreateUser` feature
+
+```bash
+Identity/Features/v1/Users/CreateUser/
+├── CreateUserCommand.cs
+├── CreateUserHandler.cs
+├── CreateUserValidator.cs
+└── CreateUserEndpoint.cs
+```
+
+<Note>
+  Each feature is a **complete vertical slice** containing:
+  - Request/response contracts
+  - Business logic
+  - Validation rules
+  - HTTP endpoint mapping
+</Note>
+
+### Module Registration
+
+Modules self-register via `IModule` interface:
+
+```csharp src/Modules/Identity/IdentityModule.cs
+public sealed class IdentityModule : IModule
+{
+    public void RegisterModule(IServiceCollection services, IConfiguration config)
+    {
+        // Register module-specific services
+        services.AddDbContext<IdentityDbContext>();
+        services.AddScoped<IUserService, UserService>();
+        services.AddIdentityCore<ApplicationUser>();
+        // ...
+    }
+
+    public void UseModule(IApplicationBuilder app)
+    {
+        // Configure middleware if needed
+    }
+
+    public void MapEndpoints(IEndpointRouteBuilder endpoints)
+    {
+        var group = endpoints.MapGroup("/api/v1/identity");
+        // Map endpoints from Features/
+        group.MapPost("/tokens", GenerateTokenEndpoint.Handle);
+        group.MapPost("/users", CreateUserEndpoint.Handle);
+        // ...
+    }
+}
+```
+
+### Contracts Projects
+
+Each module has a separate **Contracts** project containing:
+- DTOs (Data Transfer Objects)
+- Request/Response models
+- Public interfaces
+
+This allows other modules to reference contracts **without** taking a dependency on the full module implementation.
+
+```bash
+Modules.Identity.Contracts/v1/Tokens/
+├── TokenGeneration/
+│   ├── GenerateTokenCommand.cs        # Shared contract
+│   └── TokenResponse.cs               # Shared response
+```
+
+## src/Playground/
+
+Reference implementation demonstrating how to use the framework:
+
+```bash
+src/Playground/
+├── Playground.Api/                    # ASP.NET Core Web API
+│   ├── Program.cs                     # Application entry point
+│   ├── appsettings.json               # Configuration
+│   └── wwwroot/uploads/               # Local file storage
+├── Playground.Blazor/                 # Blazor WebAssembly UI
+│   ├── Pages/                         # Blazor pages
+│   ├── Services/                      # API client services
+│   └── Program.cs
+├── Migrations.PostgreSQL/             # EF Core migrations (PostgreSQL)
+├── Migrations.SqlServer/              # EF Core migrations (SQL Server)
+└── FSH.Playground.AppHost/            # .NET Aspire orchestration
+    └── AppHost.cs                     # Container orchestration
+```
+
+### Playground.Api
+
+Minimal Program.cs demonstrating module composition:
+
+```csharp src/Playground/Playground.Api/Program.cs
+var builder = WebApplication.CreateBuilder(args);
+
+// Validate required configuration in Production
+if (builder.Environment.IsProduction())
+{
+    Require(builder.Configuration, "DatabaseOptions:ConnectionString");
+    Require(builder.Configuration, "CachingOptions:Redis");
+    Require(builder.Configuration, "JwtOptions:SigningKey");
+}
+
+// Register Mediator with module assemblies
+builder.Services.AddMediator(o =>
+{
+    o.ServiceLifetime = ServiceLifetime.Scoped;
+    o.Assemblies = [
+        typeof(GenerateTokenCommand),
+        typeof(GenerateTokenCommandHandler),
+        typeof(GetTenantStatusQuery),
+        typeof(GetTenantStatusQueryHandler),
+        typeof(FSH.Modules.Auditing.Contracts.AuditEnvelope),
+        typeof(FSH.Modules.Auditing.Persistence.AuditDbContext)];
+});
+
+// Module assemblies
+var moduleAssemblies = new Assembly[]
+{
+    typeof(IdentityModule).Assembly,
+    typeof(MultitenancyModule).Assembly,
+    typeof(AuditingModule).Assembly
+};
+
+// Add framework + modules
+builder.AddHeroPlatform(o =>
+{
+    o.EnableCaching = true;
+    o.EnableMailing = true;
+    o.EnableJobs = true;
+});
+builder.AddModules(moduleAssemblies);
+
+var app = builder.Build();
+
+// Apply tenant migrations
+app.UseHeroMultiTenantDatabases();
+
+// Use framework + map module endpoints
+app.UseHeroPlatform(p =>
+{
+    p.MapModules = true;
+    p.ServeStaticFiles = true;
+});
+
+// Custom endpoint
+app.MapGet("/", () => Results.Ok(new { message = "hello world!" }))
+   .WithTags("PlayGround")
+   .AllowAnonymous();
+
+await app.RunAsync();
+```
+
+<Note>
+  The entire API is configured in **70 lines** thanks to the modular framework design.
+</Note>
+
+### Migrations Projects
+
+Separate projects for each database provider:
+
+- **`Migrations.PostgreSQL`**: Contains all EF Core migrations for PostgreSQL (Npgsql provider)
+- **`Migrations.SqlServer`**: Contains migrations for SQL Server
+
+This allows switching providers by changing:
+1. `DatabaseOptions__Provider` config
+2. `DatabaseOptions__MigrationsAssembly` config
+
+## src/Tests/
+
+Architecture and unit tests:
+
+```bash
+src/Tests/
+├── Architecture.Tests/                # NetArchTest rules
+│   ├── LayerTests.cs                  # Enforce layer dependencies
+│   ├── ModuleTests.cs                 # Module boundary checks
+│   └── NamingTests.cs                 # Naming conventions
+├── Modules.Identity.Tests/            # Identity module tests
+├── Modules.Multitenancy.Tests/        # Multitenancy tests
+└── BuildingBlocks.Tests/              # Framework tests
+```
+
+### Architecture Tests
+
+Enforce architectural rules at build time:
+
+```csharp
+[Fact]
+public void Modules_Should_Not_Reference_Other_Modules()
+{
+    var result = Types.InAssembly(typeof(IdentityModule).Assembly)
+        .Should()
+        .NotHaveDependencyOn("FSH.Modules.Multitenancy")
+        .GetResult();
+
+    Assert.True(result.IsSuccessful);
+}
+```
+
+## src/Tools/
+
+CLI utilities for developers:
+
+```bash
+src/Tools/
+└── CLI/                               # Command-line tool
+    ├── Commands/                      # Spectre.Console commands
+    └── Program.cs
+```
+
+Usage:
+```bash
+dotnet run --project src/Tools/CLI -- generate:module Catalog
+dotnet run --project src/Tools/CLI -- generate:feature CreateProduct
+```
+
+## Key Principles
+
+<CardGroup cols={2}>
+  <Card title="Vertical Slices" icon="layer-group">
+    Each feature is a complete slice from request to response
+  </Card>
+  <Card title="Module Isolation" icon="cube">
+    Modules reference contracts, not implementations
+  </Card>
+  <Card title="Framework Separation" icon="shield">
+    BuildingBlocks are protected from business logic
+  </Card>
+  <Card title="Configuration Over Code" icon="code">
+    Behavior controlled via appsettings.json
+  </Card>
+</CardGroup>
+
+## Navigation Guide
+
+| To understand... | Explore... |
+|------------------|------------|
+| **DDD primitives** | `src/BuildingBlocks/Core/Domain/` |
+| **EF Core setup** | `src/BuildingBlocks/Persistence/` |
+| **Authentication** | `src/Modules/Identity/Authorization/` |
+| **Multi-tenancy** | `src/Modules/Multitenancy/` |
+| **CQRS pattern** | `src/Modules/*/Features/v1/` |
+| **API hosting** | `src/BuildingBlocks/Web/` |
+| **Module loading** | `src/BuildingBlocks/Web/Modules/` |
+| **Configuration** | `src/Playground/Playground.Api/appsettings.json` |
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Architecture" icon="sitemap" href="/architecture/overview">
+    Deep dive into modular monolith architecture
+  </Card>
+  <Card title="Modules" icon="cubes" href="/modules/overview">
+    Learn about core modules
+  </Card>
+  <Card title="CQRS" icon="arrows-split-up-and-left" href="/architecture/cqrs-mediator">
+    Implement commands and queries
+  </Card>
+  <Card title="Add Feature" icon="plus" href="/development/creating-features">
+    Create your first feature slice
+  </Card>
+</CardGroup>

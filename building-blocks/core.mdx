@@ -1,0 +1,412 @@
+---
+title: Core Building Block
+description: Domain-driven design primitives, entities, domain events, and custom exceptions
+icon: gem
+---
+
+## Overview
+
+The **Core** building block provides foundational abstractions for domain-driven design (DDD). It includes base entity classes, domain event infrastructure, and custom exception types for consistent error handling.
+
+<Note>
+  Core is the most fundamental building block — all other blocks and modules depend on it.
+</Note>
+
+## Key Components
+
+### Domain Entities
+
+#### IEntity&lt;TId&gt;
+
+Base interface for all entities with strongly-typed identifiers:
+
+```csharp IEntity.cs
+namespace FSH.Framework.Core.Domain;
+
+public interface IEntity<out TId>
+{
+    TId Id { get; }
+}
+```
+
+#### BaseEntity&lt;TId&gt;
+
+Base class providing identity and domain event collection:
+
+```csharp BaseEntity.cs
+namespace FSH.Framework.Core.Domain;
+
+public abstract class BaseEntity<TId> : IEntity<TId>, IHasDomainEvents
+{
+    private readonly List<IDomainEvent> _domainEvents = [];
+
+    public TId Id { get; protected set; } = default!;
+
+    public IReadOnlyCollection<IDomainEvent> DomainEvents => _domainEvents;
+
+    protected void AddDomainEvent(IDomainEvent @event)
+        => _domainEvents.Add(@event);
+
+    public void ClearDomainEvents() => _domainEvents.Clear();
+}
+```
+
+#### AggregateRoot&lt;TId&gt;
+
+Marker class for aggregate roots in DDD:
+
+```csharp AggregateRoot.cs
+namespace FSH.Framework.Core.Domain;
+
+public abstract class AggregateRoot<TId> : BaseEntity<TId>
+{
+    // Put aggregate-wide behaviors/helpers here if needed
+}
+```
+
+### Domain Events
+
+#### IDomainEvent
+
+Contract for all domain events:
+
+```csharp IDomainEvent.cs
+namespace FSH.Framework.Core.Domain;
+
+public interface IDomainEvent
+{
+    Guid EventId { get; }
+    DateTimeOffset OccurredOnUtc { get; }
+    string? CorrelationId { get; }
+    string? TenantId { get; }
+}
+```
+
+#### DomainEvent
+
+Base record for domain events with factory method:
+
+```csharp DomainEvent.cs
+namespace FSH.Framework.Core.Domain;
+
+public abstract record DomainEvent(
+    Guid EventId,
+    DateTimeOffset OccurredOnUtc,
+    string? CorrelationId = null,
+    string? TenantId = null
+) : IDomainEvent
+{
+    public static T Create<T>(Func<Guid, DateTimeOffset, T> factory)
+        where T : DomainEvent
+    {
+        ArgumentNullException.ThrowIfNull(factory);
+        return factory(Guid.NewGuid(), DateTimeOffset.UtcNow);
+    }
+}
+```
+
+### Entity Markers
+
+#### IAuditableEntity
+
+Tracks creation and modification metadata:
+
+```csharp IAuditableEntity.cs
+namespace FSH.Framework.Core.Domain;
+
+public interface IAuditableEntity
+{
+    DateTimeOffset CreatedOnUtc { get; }
+    string? CreatedBy { get; }
+    DateTimeOffset? LastModifiedOnUtc { get; }
+    string? LastModifiedBy { get; }
+}
+```
+
+#### ISoftDeletable
+
+Supports soft delete pattern:
+
+```csharp ISoftDeletable.cs
+namespace FSH.Framework.Core.Domain;
+
+public interface ISoftDeletable
+{
+    bool IsDeleted { get; }
+    DateTimeOffset? DeletedOnUtc { get; }
+    string? DeletedBy { get; }
+}
+```
+
+### Custom Exceptions
+
+#### CustomException
+
+Base exception with HTTP status codes:
+
+```csharp CustomException.cs
+using System.Net;
+
+namespace FSH.Framework.Core.Exceptions;
+
+public class CustomException : Exception
+{
+    public IReadOnlyList<string> ErrorMessages { get; }
+    public HttpStatusCode StatusCode { get; }
+
+    public CustomException(
+        string message,
+        IEnumerable<string>? errors,
+        HttpStatusCode statusCode = HttpStatusCode.InternalServerError)
+        : base(message)
+    {
+        ErrorMessages = errors?.ToList() ?? new List<string>();
+        StatusCode = statusCode;
+    }
+}
+```
+
+#### NotFoundException
+
+Throws 404 Not Found:
+
+```csharp NotFoundException.cs
+using System.Net;
+
+namespace FSH.Framework.Core.Exceptions;
+
+public class NotFoundException : CustomException
+{
+    public NotFoundException()
+        : base("Resource not found.", Array.Empty<string>(), HttpStatusCode.NotFound)
+    {
+    }
+
+    public NotFoundException(string message)
+        : base(message, Array.Empty<string>(), HttpStatusCode.NotFound)
+    {
+    }
+}
+```
+
+#### Other Exceptions
+
+- **ForbiddenException**: 403 Forbidden (access denied)
+- **UnauthorizedException**: 401 Unauthorized (authentication failed)
+
+## Usage Examples
+
+### Creating an Entity
+
+```csharp Product.cs
+using FSH.Framework.Core.Domain;
+
+namespace MyModule.Domain;
+
+public sealed class Product : AggregateRoot<Guid>
+{
+    public string Name { get; private set; } = default!;
+    public decimal Price { get; private set; }
+
+    private Product() { } // EF Core
+
+    public static Product Create(string name, decimal price)
+    {
+        var product = new Product
+        {
+            Id = Guid.NewGuid(),
+            Name = name,
+            Price = price
+        };
+
+        // Raise domain event
+        var @event = DomainEvent.Create<ProductCreatedEvent>(
+            (id, occurredOn) => new(id, occurredOn, product.Id, name)
+        );
+        product.AddDomainEvent(@event);
+
+        return product;
+    }
+
+    public void UpdatePrice(decimal newPrice)
+    {
+        if (newPrice <= 0)
+            throw new CustomException("Price must be positive.", null, HttpStatusCode.BadRequest);
+
+        Price = newPrice;
+
+        var @event = DomainEvent.Create<ProductPriceChangedEvent>(
+            (id, occurredOn) => new(id, occurredOn, Id, newPrice)
+        );
+        AddDomainEvent(@event);
+    }
+}
+```
+
+### Creating a Domain Event
+
+```csharp ProductCreatedEvent.cs
+using FSH.Framework.Core.Domain;
+
+namespace MyModule.Domain.Events;
+
+public sealed record ProductCreatedEvent(
+    Guid EventId,
+    DateTimeOffset OccurredOnUtc,
+    Guid ProductId,
+    string ProductName,
+    string? CorrelationId = null,
+    string? TenantId = null
+) : DomainEvent(EventId, OccurredOnUtc, CorrelationId, TenantId);
+```
+
+### Auditable Entity
+
+```csharp Order.cs
+using FSH.Framework.Core.Domain;
+
+namespace MyModule.Domain;
+
+public sealed class Order : AggregateRoot<Guid>, IAuditableEntity
+{
+    public string OrderNumber { get; private set; } = default!;
+    public decimal TotalAmount { get; private set; }
+
+    // IAuditableEntity properties (set by interceptor)
+    public DateTimeOffset CreatedOnUtc { get; set; }
+    public string? CreatedBy { get; set; }
+    public DateTimeOffset? LastModifiedOnUtc { get; set; }
+    public string? LastModifiedBy { get; set; }
+}
+```
+
+<Note>
+  Audit properties are automatically populated by the `DomainEventsInterceptor` in the Persistence layer.
+</Note>
+
+### Soft Deletable Entity
+
+```csharp Customer.cs
+using FSH.Framework.Core.Domain;
+
+namespace MyModule.Domain;
+
+public sealed class Customer : AggregateRoot<Guid>, ISoftDeletable
+{
+    public string Name { get; private set; } = default!;
+    public string Email { get; private set; } = default!;
+
+    // ISoftDeletable properties
+    public bool IsDeleted { get; private set; }
+    public DateTimeOffset? DeletedOnUtc { get; private set; }
+    public string? DeletedBy { get; private set; }
+
+    public void Delete(string deletedBy)
+    {
+        IsDeleted = true;
+        DeletedOnUtc = DateTimeOffset.UtcNow;
+        DeletedBy = deletedBy;
+    }
+}
+```
+
+<Note>
+  Soft deleted entities are automatically filtered by the `BaseDbContext` using EF Core global query filters.
+</Note>
+
+### Throwing Custom Exceptions
+
+```csharp UpdateProductHandler.cs
+using FSH.Framework.Core.Exceptions;
+using System.Net;
+
+public async ValueTask<Unit> Handle(UpdateProductCommand cmd, CancellationToken ct)
+{
+    var product = await _repository.GetByIdAsync(cmd.Id, ct)
+        ?? throw new NotFoundException($"Product {cmd.Id} not found.");
+
+    if (cmd.Price <= 0)
+    {
+        throw new CustomException(
+            "Invalid product data.",
+            new[] { "Price must be greater than zero." },
+            HttpStatusCode.BadRequest
+        );
+    }
+
+    product.UpdatePrice(cmd.Price);
+    await _repository.UpdateAsync(product, ct);
+    return Unit.Value;
+}
+```
+
+## Best Practices
+
+<Steps>
+  <Step title="Use Factory Methods">
+    Always create entities via static factory methods (e.g., `Product.Create`) to enforce invariants.
+  </Step>
+  <Step title="Private Setters">
+    Use `private set` for entity properties to prevent external mutation. Only allow changes through methods.
+  </Step>
+  <Step title="Raise Domain Events">
+    Use `AddDomainEvent()` to record state changes. Events are dispatched by the `DomainEventsInterceptor`.
+  </Step>
+  <Step title="Aggregate Boundaries">
+    Only aggregate roots (`AggregateRoot<TId>`) should be accessed via repositories.
+  </Step>
+  <Step title="Strongly-Typed IDs">
+    Use `Guid`, `int`, or custom value objects for entity IDs. Avoid `string` IDs unless required.
+  </Step>
+</Steps>
+
+## Integration with Persistence
+
+Domain events are dispatched automatically during `SaveChangesAsync`:
+
+```csharp DomainEventsInterceptor.cs (Persistence)
+public override async ValueTask<int> SavedChangesAsync(
+    SaveChangesCompletedEventData eventData,
+    int result,
+    CancellationToken ct = default)
+{
+    if (eventData.Context is null) return result;
+
+    var events = eventData.Context.ChangeTracker
+        .Entries<IHasDomainEvents>()
+        .SelectMany(e => e.Entity.DomainEvents)
+        .ToList();
+
+    foreach (var @event in events)
+    {
+        await _mediator.Publish(@event, ct);
+    }
+
+    return result;
+}
+```
+
+## Package Reference
+
+```xml YourModule.csproj
+<ItemGroup>
+  <ProjectReference Include="..\..\BuildingBlocks\Core\FSH.Framework.Core.csproj" />
+</ItemGroup>
+```
+
+## Related Resources
+
+<CardGroup cols={2}>
+  <Card title="Persistence Layer" icon="database" href="/building-blocks/persistence">
+    Repository pattern for aggregate roots
+  </Card>
+  <Card title="Eventing" icon="signal" href="/building-blocks/eventing">
+    Domain events vs integration events
+  </Card>
+  <Card title="Add Entity Skill" icon="wand-magic-sparkles" href="/architecture/domain-driven-design">
+    Generate DDD entities with the CLI
+  </Card>
+  <Card title="DDD Patterns" icon="book" href="https://martinfowler.com/bliki/DomainDrivenDesign.html">
+    Learn more about domain-driven design
+  </Card>
+</CardGroup>
